@@ -1,5 +1,5 @@
 # Data
-#/data/
+/data/
 
 # Mac OS-specific storage files
 .DS_Store
@@ -190,14 +190,7 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-# MLflow local tracking
+notebooks/mlruns/
+notebooks/mlflow.db
 mlruns/
-
-
-# Modelos intermedios
-models/logreg_binary_pca*_pw*/
-models/*_sweep*/
-
-# Bbdd de SQLite de MLflow
 mlflow.db
-*.db

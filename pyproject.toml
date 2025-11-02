@@ -16,27 +16,18 @@ classifiers = [
     "License :: OSI Approved :: MIT License"
 ]
 dependencies = [
-    "fastparquet>=2024.11.0",
     "ipython",
-    "joblib>=1.5.2",
     "jupyterlab",
     "matplotlib",
     "mkdocs",
-    "mlflow>=3.7.0",
     "notebook",
     "numpy",
-    "openpyxl>=3.1.5",
     "pandas",
     "pip",
-    "pyarrow>=22.0.0",
-    "pyreadr>=0.5.3",
     "pytest",
     "python-dotenv",
-    "pyyaml>=6.0.3",
     "ruff",
     "scikit-learn",
-    "seaborn>=0.13.2",
-    "umap-learn>=0.5.9.post2",
 ]
 requires-python = "~=3.12.0"
 
@@ -53,7 +44,3 @@ extend-select = ["I"]  # Add import sorting
 known-first-party = ["genomics_dl"]
 force-sort-within-sections = true
 
-[dependency-groups]
-dev = [
-    "pre-commit>=4.3.0",
-]
