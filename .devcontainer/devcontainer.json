@@ -1,0 +1,20 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/alpine
+{
+	"name": "TFM Genomics DL",
+
+	"image": "mcr.microsoft.com/devcontainers/python:3.12",
+	
+	"runArgs": ["--name", "genomics-dl-dev"],
+
+	"features": { "ghcr.io/devcontainers/features/git:1": {} },
+
+	"postCreateCommand": "pip install uv pre-commit && uv sync && pre-commit install && python -m ipykernel install --user --name=genomics-dl",
+	
+	"customizations": {
+		"vscode": { 
+			"extensions": ["ms-python.python","ms-toolsai.jupyter","charliermarsh.ruff"]
+			}
+		}
+
+}
