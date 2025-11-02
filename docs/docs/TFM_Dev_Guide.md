@@ -128,6 +128,11 @@ git lfs pull
 > Si se subieron archivos grandes sin LFS y se desea corregir el historial:
 > `git lfs migrate import --include="data/**"` (hacerlo en una rama y revisar antes de fusionar).
 
+### 4.4 Límites y cuotas (resumen práctico)
+- GitHub avisa a **> 50 MiB** y **bloquea > 100 MB** si el archivo **no** está en LFS.
+- Con **Git LFS**, los límites aplican por **cuota de almacenamiento** y **ancho de banda** según el plan (verifica en la web oficial). Mantener pocas versiones de ficheros muy grandes evita agotar almacenamiento.
+- Recomendado: usar `git lfs ls-files` para auditar y evitar subidas accidentales fuera de LFS.
+
 ---
 
 ## 5) Trabajo con Dev Container
@@ -174,8 +179,88 @@ git fetch -p        # limpiar referencias remotas
 
 ---
 
-## 8) Pre-commit útil (opcional pero recomendado)
-Ejemplo de hooks mínimos en `.pre-commit-config.yaml`:
+## 8) **pre-commit en el flujo de trabajo (uso diario)**
+**Objetivo:** automatizar comprobaciones/arreglos antes de cada commit para mantener calidad y coherencia del repo.
+
+### 8.1 Ciclo típico con pre-commit
+```bash
+# 1) Trabajar y preparar cambios
+git add -A
+
+# 2) Commit: ejecutará automáticamente los hooks configurados
+git commit -m "feat: ..."
+
+# 3) Si algún hook modifica archivos o falla:
+#    - revisar salida en terminal
+#    - volver a añadir y hacer commit
+git add -A
+git commit -m "chore: apply pre-commit fixes"
+```
+
+### 8.2 Comprobar el repo completo
+Después de cambiar hooks o al incorporarse al proyecto:
+```bash
+pre-commit run --all-files
+git add -A && git commit -m "chore: pre-commit fixes"
+```
+
+### 8.3 Actualizar hooks y versiones
+```bash
+pre-commit autoupdate         # sube a las últimas versiones compatibles
+git add .pre-commit-config.yaml
+git commit -m "chore: pre-commit autoupdate"
+```
+
+### 8.4 Añadir/quitar hooks
+Editar `.pre-commit-config.yaml`, por ejemplo:
+```yaml
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.7.1
+    hooks:
+      - id: nbstripout
+        args: [--keep-output=False]
+  - repo: https://github.com/pre-commit/mirrors-ruff
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+```
+Tras editar:
+```bash
+pre-commit install
+pre-commit run --all-files
+git add -A && git commit -m "chore: update hooks"
+```
+
+### 8.5 Saltar hooks puntualmente (solo si es imprescindible)
+```bash
+git commit -m "WIP: ..." --no-verify        # no ejecuta pre-commit
+# o (temporal) desactivar un hook concreto con la variable SKIP
+SKIP=nbstripout git commit -m "docs: keep outputs"
+```
+
+### 8.6 Integración en PR/CI
+- Ejecutar `pre-commit run --all-files` en CI para “gating” homogéneo.
+- Servicio **pre-commit.ci** puede aplicar fixes automáticamente en PRs.
+- Mantener el mismo `.pre-commit-config.yaml` asegura consistencia entre máquinas.
+
+---
+
+## 9) **Mantenimiento práctico de pre-commit (día a día)**
+- **Tras clonar o cambiar de máquina**: `pre-commit install` (una vez).
+- **Rendimiento**: pre-commit cachea entornos; tras actualizar hooks, el primer run puede tardar más.
+- **LFS + hooks**: usar `check-added-large-files` con umbral razonable y `git lfs track` para binarios grandes.
+- **EOL/CRLF**: fijar reglas en `.gitattributes` y mantener `core.autocrlf=input` en entornos UNIX (Linux/macOS).
+
+**Ejemplo `.pre-commit-config.yaml` mínimo recomendado**
 ```yaml
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -185,79 +270,12 @@ repos:
       - id: trailing-whitespace
       - id: mixed-line-ending
       - id: check-yaml
-      - id: check-added-large-files
-        args: ["--maxkb=51200"]  # 50 MB
-
   - repo: https://github.com/kynan/nbstripout
     rev: 0.7.1
     hooks:
       - id: nbstripout
         args: [--keep-output=False]
 ```
-
-Activación:
-```bash
-pre-commit install
-```
-
----
-
-## 9) Problemas frecuentes (solución rápida)
-
-### 9.1 Hooks de pre-commit y commits bloqueados
-Si aparece:
-```
-No .pre-commit-config.yaml file was found
-```
-existe un *hook* instalado sin configuración. Opciones:
-
-**A) Añadir configuración mínima (recomendado)**
-```bash
-cat > .pre-commit-config.yaml <<'YAML'
-repos:
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
-    hooks:
-      - id: end-of-file-fixer
-      - id: trailing-whitespace
-      - id: mixed-line-ending
-      - id: check-yaml
-YAML
-pre-commit install
-git add .pre-commit-config.yaml
-git commit -m "chore: add minimal pre-commit config"
-```
-
-**B) Permitir commits sin config (temporal)**
-```bash
-PRE_COMMIT_ALLOW_NO_CONFIG=1 git commit -m "mensaje"
-```
-o reinstalar el hook:
-```bash
-pre-commit install --allow-missing-config
-```
-
-**C) Desinstalar el hook**
-```bash
-pre-commit uninstall
-```
-
-### 9.2 Aviso de finales de línea: “LF will be replaced by CRLF”
-Para evitar conversiones CRLF↔LF, fijar `.gitattributes`:
-```gitattributes
-* text=auto
-*.py eol=lf
-*.md eol=lf
-*.yml eol=lf
-*.yaml eol=lf
-*.sh eol=lf
-*.ipynb -diff
-```
-y/o configurar Git:
-```bash
-git config core.autocrlf input
-```
-Volver a intentar el commit/push después.
 
 ---
 
@@ -280,6 +298,11 @@ uv run <cmd>
 git lfs ls-files
 git lfs pull
 git lfs track "<patrones>"
+
+# pre-commit
+pre-commit install
+pre-commit run --all-files
+pre-commit autoupdate
 ```
 
 ---
