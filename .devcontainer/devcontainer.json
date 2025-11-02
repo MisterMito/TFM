@@ -4,15 +4,15 @@
 	"name": "TFM Genomics DL",
 
 	"build": { "dockerfile": "Dockerfile" },
-	
+
 	"runArgs": ["--name", "genomics-dl-dev"],
 
 	"features": { "ghcr.io/devcontainers/features/git:1": {} },
 
 	"postCreateCommand": "pip install uv pre-commit && uv sync && pre-commit install && python -m ipykernel install --user --name=genomics-dl",
-	
+
 	"customizations": {
-		"vscode": { 
+		"vscode": {
 			"extensions": ["ms-python.python","ms-toolsai.jupyter","charliermarsh.ruff"]
 			}
 		}
