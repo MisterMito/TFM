@@ -1,0 +1,165 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (no LFS fetch para no descargar binarios)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install git-lfs (binary only, no fetch)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-lfs
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+            .venv
+          key: ${{ runner.os }}-uv-${{ hashFiles('uv.lock') }}
+          restore-keys: ${{ runner.os }}-uv-
+
+      - name: Sync deps (frozen)
+        run: uv sync --frozen
+
+      - name: Run pre-commit on all files
+        run: uv run pre-commit run --all-files
+
+      - name: Enforce LFS for very large files
+        shell: bash
+        run: |
+          # Umbrales (100MB hard, 50MB warning)
+          HARD=100000000
+          WARN=50000000
+
+          mapfile -t FILES < <(git ls-files)
+          FAIL=0
+          for f in "${FILES[@]}"; do
+            [ -f "$f" ] || continue
+            size=$(wc -c < "$f")
+            # ¿Está en LFS?
+            if git lfs ls-files --name-only | grep -qx "$f"; then
+              continue
+            fi
+            if [ "$size" -gt "$HARD" ]; then
+              echo "::error file=$f::Archivo >100MB sin LFS: $f ($size bytes)"
+              FAIL=1
+            elif [ "$size" -gt "$WARN" ]; then
+              echo "::warning file=$f::Archivo >50MB sin LFS (recomendado LFS): $f ($size bytes)"
+            fi
+          done
+          exit $FAIL
+
+  # ---------- Tests ----------
+  tests:
+    needs: [lint]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+            .venv
+          key: ${{ runner.os }}-uv-${{ hashFiles('uv.lock') }}
+          restore-keys: ${{ runner.os }}-uv-
+
+      - name: Sync deps (frozen)
+        run: uv sync --frozen
+
+      - name: Run tests
+        run: uv run pytest -q
+
+  build-package:
+    needs: [lint]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Sync deps (frozen)
+        run: uv sync --frozen
+
+      - name: Build (wheel + sdist)
+        run: uv build
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  notebooks-smoke:
+    if: ${{ always() }}
+    needs: [lint]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Sync deps (frozen)
+        run: uv sync --frozen
+
+      - name: Install notebook tools (ephemeral)
+        run: uv run python -m pip install --quiet nbconvert nbclient nbformat
+
+      - name: Execute smoke notebooks
+        shell: bash
+        run: |
+          set -e
+          shopt -s nullglob
+          for nb in notebooks/smoke/*.ipynb; do
+            echo ">>> Executing $nb"
+            uv run jupyter nbconvert --to notebook --execute "$nb" --output /tmp/out.ipynb \
+              --ExecutePreprocessor.timeout=600
+          done
+
+  devcontainer-build:
+    needs: [lint]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build devcontainer
+        run: |
+          if [ -f .devcontainer/Dockerfile ]; then
+            docker build -f .devcontainer/Dockerfile -t tfm-devcontainer:ci .
+          else
+            echo "No Dockerfile de devcontainer encontrado; skipping."
+          fi
