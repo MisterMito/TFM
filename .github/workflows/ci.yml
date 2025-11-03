@@ -39,7 +39,7 @@ jobs:
           restore-keys: ${{ runner.os }}-uv-
 
       - name: Sync deps (frozen)
-        run: uv sync --frozen
+        run: uv sync --frozen --all-groups
 
       - name: Run pre-commit on all files
         run: uv run pre-commit run --all-files
@@ -91,7 +91,7 @@ jobs:
           restore-keys: ${{ runner.os }}-uv-
 
       - name: Sync deps (frozen)
-        run: uv sync --frozen
+        run: uv sync --frozen --all-groups
 
       - name: Run tests
         run: uv run pytest -q
