@@ -279,7 +279,59 @@ repos:
 
 ---
 
-## 10) Chuleta de comandos
+## 10) CI de PR — Resumen del workflow (GitHub Actions)
+
+**Objetivo:** validar automáticamente **antes del merge** a `main` que el repo está sano: formato/calidad (pre-commit), tests rápidos, build de paquete, smoke-test de notebooks de notebooks ligeros, build del devcontainer.
+
+## Disparadores y concurrencia
+- **on:** `pull_request` y `push` a `main`.
+- **concurrency:** cancela ejecuciones anteriores de la misma rama/PR para ahorrar tiempo.
+
+
+**Jobs:**
+
+### 10.1 `lint` (**gating de calidad básica**)
+- **Instala deps con `uv` (modo `--frozen`)** para reproducibilidad exacta.
+- **Ejecuta `pre-commit`** sobre todos los archivos (formato, trailing spaces, nbstripout, linters…).
+- **Enforce LFS:** avisa >50MB y **falla** si hay archivos >100MB sin LFS.
+> Resultado: asegura estilo, convenciones y que no entren binarios enormes sin control.
+
+### 10.2 `tests` (test unitarios/integration rápidos)
+- Corre tras `lint`.
+- Repite instalación de `uv` + cache y `uv sync --frozen`.
+- Ejecuta **`pytest -q`** Idealmente, tests rápidos y deterministas que no dependan de datos grandes (o “marcados” para excluirlos en CI).
+> Resultado: confirma que el código sigue pasando pruebas básicas.
+
+
+### 10.3 `build-package` (empaquetado)
+- Corre tras `lint`.
+- Instala deps con `uv` y ejecuta **`uv build`** (genera wheel + sdist) y guarda artefactos.
+> Resultado: publica artefactos con `actions/upload-artifact` para inspección/descarga desde la UI del run (`dist/*`).
+
+
+### 10.4 `notebooks-smoke` (sanidad mínima de notebooks)
+- Corre tras `lint` (puede configurarse como informativo).
+- Ejecuta **solo** notebooks ligeros en `notebooks/smoke/` con `nbconvert` (sin LFS ni datos pesados).
+> Resultado: detecta errores triviales en notebooks (imports/rutas) sin frenar el flujo.
+
+### 10.5 `devcontainer-build` (compilación del entorno)
+- Intenta `docker build` del **Dev Container** si existe `.devcontainer/Dockerfile`.
+> Resultado: evita roturas del entorno de desarrollo compartido.
+
+## Uso recomendado
+- Marca como **required** en Branch Protection los jobs clave: `lint`, `tests`, (opcional `build-package` y/o `notebooks-smoke` / `devcontainer-build`).
+- Mantén los **smoke** cortos y deterministas; evita datos grandes.
+- Actualiza deps vía PR para mantener `uv.lock` coherente.
+
+## Debug local rápido
+- Lint: `uv sync --frozen && uv run pre-commit run --all-files`
+- Tests: `uv run pytest -q`
+- Build: `uv build`
+- Smoke (ejemplo): `uv run jupyter nbconvert --to notebook --execute notebooks/smoke/00_env_check.ipynb --output /tmp/out.ipynb --ExecutePreprocessor.timeout=600`
+
+---
+
+## 11) Chuleta de comandos
 ```bash
 # Git
 git status
@@ -307,9 +359,9 @@ pre-commit autoupdate
 
 ---
 
-## 11) Modelos: versionado y buenas prácticas
+## 12) Modelos: versionado y buenas prácticas
 
-### 11.1 Dónde y cómo guardar modelos
+### 12.1 Dónde y cómo guardar modelos
 - **Carpeta**: `models/` (git-ignorada por defecto) o versionada vía **Git LFS** si se necesita compartir directamente desde GitHub.
 - **Estructura sugerida** (sin registry externo):
 ```
@@ -329,7 +381,7 @@ models/
   - Scikit-learn: `joblib.dump()`.
   - Incluir tokenizers/escaladores y cualquier artefacto necesario para inferencia.
 
-### 11.2 Versionado (semver + metadatos)
+### 12.2 Versionado (semver + metadatos)
 - **SemVer**: `MAJOR.MINOR.PATCH` (p. ej., `v0.2.1`).
 - **Metadatos mínimos** (`params.yaml`/`metrics.json`):
   - `run_id` y `timestamp`.
@@ -340,7 +392,7 @@ models/
   - `python_version` y conjunto de paquetes (o referencia a `uv.lock`).
   - `hardware` (CPU/GPU) si es relevante.
 
-### 11.3 Registro de modelos (opciones)
+### 12.3 Registro de modelos (opciones)
 - **Git LFS**: simple, dentro del repo (atención a cuotas).
 - **MLflow Tracking + Model Registry**:
   - Instalar: `uv add mlflow`
@@ -357,33 +409,33 @@ models/
   - Permite comparar ejecuciones, versionar artefactos y promover (Staging → Production).
 - **Alternativas**: registries cloud (Azure ML), DVC/Iterative Studio, Hubs privados.
 
-### 11.4 Reproducibilidad
+### 12.4 Reproducibilidad
 - Fijar semillas (NumPy/PyTorch/Sklearn) y documentarlas.
 - Versionar `uv.lock` junto con el commit del entrenamiento.
 - Registrar datos, splits, hiperparámetros y métricas comparables.
 - Definir y guardar `signature.json` (forma y tipos de entrada/salida).
 
-### 11.5 Criterios de liberación (“gating”)
+### 12.5 Criterios de liberación (“gating”)
 - Establecer umbrales mínimos (p. ej., `roc_auc ≥ x`, `f1 ≥ y`).
 - Mantener un conjunto de evaluación estable (hold-out) o validación cruzada.
 - Revisar sesgos y robustez básica.
 
-### 11.6 Despliegue y compatibilidad
+### 12.6 Despliegue y compatibilidad
 - Exportar formato portable (ONNX cuando proceda) y un script mínimo de inferencia (`predict.py`).
 - Documentar dependencias especiales (CUDA/cuDNN; `tensorflow-macos` en Apple Silicon).
 - Cuando aplique, alinear versión de imagen Docker con versión del modelo (tags coherentes).
 
-### 11.7 Model cards
+### 12.7 Model cards
 - Añadir “model cards” por versión (`models/<nombre>/vX.Y.Z/README.md` o `reports/model_cards/`), con propósito, datos, límites, métricas, riesgos y contacto.
 
-### 11.8 Limpieza y retención
+### 12.8 Limpieza y retención
 - Evitar artefactos temporales fuera de LFS.
 - Definir políticas de retención (últimos N runs, versiones promovidas).
 - Comprimir artefactos cuando no afecte a la carga (p. ej., `safetensors`).
 
 ---
 
-## 12) Estructura de carpetas (resumen)
+## 13) Estructura de carpetas (resumen)
 ```
 .
 ├── notebooks/
