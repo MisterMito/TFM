@@ -24,6 +24,7 @@ dependencies = [
     "numpy",
     "pandas",
     "pip",
+    "pyreadr>=0.5.3",
     "pytest",
     "python-dotenv",
     "ruff",
