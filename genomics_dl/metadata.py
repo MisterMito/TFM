@@ -45,6 +45,9 @@ class MetadataSpec:
     # nombre de la columna "Patient_group" normalizada
     patient_group_col_name: str = "Patient_group"
 
+    # Valores Nulos
+    numeric_cols: Sequence[str] = field(default_factory=list)
+    na_values: Sequence[str] = field(default_factory=lambda: ["n.a.", "NA", "NaN"])
 
 def load_metadata(spec: MetadataSpec) -> pd.DataFrame:
     """
@@ -71,6 +74,11 @@ def load_metadata(spec: MetadataSpec) -> pd.DataFrame:
                 .str.replace(",", ".", regex=False)
                 .astype(float)
             )
+
+    # Asegura que el esquema de los datos numéricos sea correcto
+    for col in spec.numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     # Renombrar columna de grupo a "Patient_group" para tener un nombre estándar
     if spec.group_col in df.columns:
