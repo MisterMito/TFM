@@ -16,6 +16,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License"
 ]
 dependencies = [
+    "fastparquet>=2024.11.0",
     "ipython",
     "jupyterlab",
     "matplotlib",
@@ -25,6 +26,7 @@ dependencies = [
     "openpyxl>=3.1.5",
     "pandas",
     "pip",
+    "pyarrow>=22.0.0",
     "pyreadr>=0.5.3",
     "pytest",
     "python-dotenv",
