@@ -178,3 +178,200 @@ Estos datos son los mismos que utilizó la alumna anterior, y se usan aquí como
 1. Desarrollar y validar el pipeline de datos.
 2. Entrenar los primeros modelos de clasificación (binaria y, posteriormente, multiclase).
 3. Una vez consolidado este flujo con GSE183635, **buscar y añadir nuevos datasets de características similares** para ampliar el conjunto de datos, mejorar la robustez de los modelos y explorar mejor la generalización del enfoque.
+
+---
+
+## Iteración 2: Estudio de heterogeneidad en nonMalignant y preparación del feature engineering rama (feat-feature_engineering)
+
+### 1. Objetivo de la iteración
+
+En esta iteración se ha cerrado el estudio de heterogeneidad en el grupo **nonMalignant** (análisis no supervisado) y se ha dejado preparado el **pipeline de feature engineering** para los futuros modelos supervisados de **clasificación binaria** (cáncer vs nonMalignant).
+
+La idea es que, a partir de esta base:
+
+- Quede documentada la estructura interna del grupo nonMalignant (clusters, outliers, relación con metadatos).
+- Esté definido y probado un flujo de transformación de la expresión (selección de genes, log, escalado, PCA) que se pueda reutilizar en la fase de modelos.
+
+
+### 2. Punto de partida y split train/test
+
+Se parte del dataset procesado:
+
+- `data/processed/gse183635_tep_tpm_labels.parquet`
+  (filas = muestras, columnas = genes en TPM + metadatos + etiquetas).
+
+Sobre este dataset se ha realizado:
+
+- Un **split train/test estratificado** por `Class_group`, generando:
+  - `data/processed/gse183635_tep_tpm_train.parquet`
+  - `data/processed/gse183635_tep_tpm_test.parquet`
+- Un fichero auxiliar con los IDs de muestra y el split asignado, para trazabilidad.
+
+A partir de este punto, **todo el análisis de heterogeneidad** se ha realizado exclusivamente sobre el **conjunto de entrenamiento**, respetando la separación train/test de cara a los futuros modelos supervisados.
+
+
+### 3. Estudio de heterogeneidad en nonMalignant (EDA no supervisado)
+
+Se ha filtrado el subconjunto de muestras con:
+
+- `Class_group == "nonMalignant"` sobre el **train**.
+
+Sobre este subconjunto se ha implementado un pipeline de análisis no supervisado que incluye:
+
+1. **Transformación de expresión**
+   - Aplicación de `log1p(TPM)` sobre los genes seleccionados para estabilizar la varianza.
+
+2. **Estandarización por gen**
+   - Uso de un `StandardScaler` por gen, centrando y escalando cada columna.
+
+3. **PCA con selección automática de componentes**
+   - Se ajusta un PCA completo.
+   - Se elige el menor número de componentes tal que la varianza explicada acumulada ≥ 90 %.
+   - Este espacio PCA sirve como base para:
+     - Representaciones globales (PC1–PC2).
+     - Puntos de partida para métodos no lineales.
+
+4. **Embeddings para visualización**
+   - Proyección en:
+     - PC1–PC2 para una primera visión global.
+     - UMAP sobre el espacio PCA (2D), para explorar la estructura local y posibles subgrupos dentro de nonMalignant.
+
+
+### 4. Clustering no supervisado y selección de modelo
+
+Sobre el embedding (PCA / PCA+UMAP) se ha definido una búsqueda de modelos de clustering probando:
+
+- **KMeans** para distintos valores de `k`.
+- **Gaussian Mixture Models (GMM)** para los mismos valores de `k`.
+- **AgglomerativeClustering** (linkage `"ward"`) como referencia adicional.
+
+Cada combinación algoritmo–k se evalúa con varias métricas internas:
+
+- Coeficiente de **silhouette**.
+- Índice de **Calinski–Harabasz**.
+- Índice de **Davies–Bouldin**.
+
+Durante la exploración se observó que:
+
+- Una configuración de **Agglomerative** con `linkage="average"` generaba una partición con un cluster muy grande (577 muestras) y otro de solo 1 muestra, con buenas métricas pero estructura claramente degenerada (cluster de “outlier”).
+- Esta variante se ha descartado del grid de modelos.
+
+Tras restringir la búsqueda a configuraciones razonables, la solución seleccionada ha sido:
+
+- **KMeans con k = 2**, con silhouette medio ≈ 0.28.
+- Tamaños de cluster:
+  - `cluster_auto = 0`: 385 muestras.
+  - `cluster_auto = 1`: 193 muestras.
+
+Se ha añadido la columna `cluster_auto` a los metadatos de nonMalignant (`meta_nm`) y se ha propagado a los metadatos de entrenamiento (`meta_train`) como información descriptiva sobre la estructura interna de nonMalignant.
+
+
+### 5. Asociación de clusters con metadatos
+
+Para interpretar los clusters nonMalignant, se han generado tablas de contingencia y tests estadísticos entre `cluster_auto` y distintas variables.
+
+De forma cualitativa:
+
+- Un cluster está enriquecido en **controles asintomáticos**, mientras que el otro agrupa una mayor proporción de pacientes con **patologías no malignas específicas** (angina, antiguos sarcomas, etc.).
+- Existe una asimetría clara en la distribución por **institución**, lo que apunta a una combinación de:
+  - Heterogeneidad clínica real.
+  - Posibles efectos de centro/lote.
+- Edad y sexo no explican la separación de clusters.
+
+
+### 6. Caracterización de los clusters nonMalignant
+
+Se ha creado un pequeño módulo reutilizable en:
+
+- `genomics_dl/models/heterogeneity.py`
+
+con funciones para caracterizar los clusters a nivel de expresión:
+
+1. **`differential_expression_two_clusters(X_log, cluster_labels)`**
+   - Trabaja sobre `X_log = log1p(TPM)` para nonMalignant.
+   - Asume exactamente dos clusters.
+   - Para cada gen, calcula:
+     - Media de expresión en cada cluster.
+     - Diferencia de medias y diferencia absoluta.
+     - p-valor (t-test de Welch).
+     - q-valor (corrección FDR de Benjamini–Hochberg).
+   - Devuelve un DataFrame ordenado por la diferencia absoluta de expresión.
+
+2. **`run_nonmalignant_cluster_characterization(...)`**
+   - Función envoltorio que:
+     - Ejecuta la comparación de expresión entre los dos clusters.
+     - Opcionalmente guarda un CSV con los resultados.
+     - Opcionalmente genera un heatmap con los genes más diferenciales (top N), ordenando las muestras por `cluster_auto`.
+
+Se ha ejecutado este flujo sobre `X_nm_log` y `meta_nm`, obteniendo:
+
+- Un DataFrame con los resultados de expresión diferencial entre los dos clusters nonMalignant.
+- Figuras/archivos en `reports/figures/nonmalignant/`, pensados para documentar el análisis en la memoria del TFM.
+
+
+### 7. Detección de outliers en el espacio PCA de nonMalignant
+
+En el mismo módulo de heterogeneidad se ha añadido una función para marcar muestras extremas en el embedding PCA:
+
+- **`flag_pca_distance_outliers(X_pca, quantile=0.99, center="mean")`**
+
+Esta función:
+
+- Calcula la distancia euclídea de cada muestra nonMalignant al centro del embedding PCA (media o mediana).
+- Marca como outliers las muestras cuya distancia está por encima de un cuantil dado (por defecto, 99 %, es decir, top 1 % de distancias).
+
+Con esto se ha generado:
+
+- Un flag booleano `is_outlier_pca` en los metadatos de nonMalignant (`meta_nm`).
+
+### 8. Pipeline de feature engineering preparado (aún no utilizado en modelos)
+
+Se ha dejado definido un módulo genérico de **feature engineering** para expresión génica en:
+
+- `genomics_dl/features.py`
+
+con un pequeño pipeline que encapsula:
+
+1. **Selección de genes de alta varianza**
+   - Función tipo `select_high_var_genes` para filtrar genes según un cuantil de varianza.
+
+2. **Ajuste del preprocesado en train**
+
+   - `fit_expression_preprocessor(X_train, var_quantile=0.2)`:
+     - Selecciona genes por varianza (por encima de un cuantil dado).
+     - Aplica `log1p`.
+     - Ajusta un `StandardScaler` sobre los genes seleccionados.
+     - Devuelve la información necesaria para aplicar la misma transformación después.
+
+3. **Aplicación del preprocesado en cualquier conjunto**
+
+   - `transform_expression_preprocessor(X, preproc)`:
+     - Aplica exactamente el mismo filtrado de genes, `log1p` y escalado a cualquier matriz (por ejemplo, test).
+
+4. **PCA con selección automática de componentes**
+
+   - `fit_pca_auto(X_scaled, var_threshold=0.9, max_components=...)`:
+     - Ajusta un PCA y selecciona el número de componentes para alcanzar un umbral de varianza explicada (por defecto, 90 %).
+   - `transform_pca(X_scaled, pca_model)`:
+     - Proyecta nuevos datos en el espacio PCA.
+
+Este pipeline está listo para ser utilizado de forma consistente en:
+
+- Datos de entrenamiento (train).
+- Datos de validación/test.
+
+Todavía **no se ha integrado** en los notebooks de clasificación binaria: se utilizará en la siguiente fase, cuando se monten los primeros modelos supervisados.
+
+
+### 9. Decisiones de diseño y cierre de la iteración
+
+- Las variables `cluster_auto` e `is_outlier_nonmalignant_pca` se han añadido a los metadatos de entrenamiento como información descriptiva y para documentar la heterogeneidad interna del grupo nonMalignant.
+- No está previsto utilizarlas como features de entrada en el **primer modelo binario** (cáncer vs nonMalignant), ya que:
+  - La clusterización se ha definido solo sobre nonMalignant.
+  - El objetivo principal de esta parte es exploratorio y descriptivo.
+
+- Todo el análisis no supervisado (clustering, outliers, DE entre clusters) se ha realizado únicamente sobre el **conjunto de entrenamiento**, manteniendo la separación train/test para la futura evaluación de los modelos.
+
+Con estos pasos se da por **cerrada la parte de heterogeneidad en el grupo nonMalignant** y queda preparado el diseño del **feature engineering**. La siguiente etapa del proyecto se centrará en la construcción y evaluación de los modelos de **clasificación binaria**.
+
+---
