@@ -192,7 +192,6 @@ La idea es que, a partir de esta base:
 - Quede documentada la estructura interna del grupo nonMalignant (clusters, outliers, relación con metadatos).
 - Esté definido y probado un flujo de transformación de la expresión (selección de genes, log, escalado, PCA) que se pueda reutilizar en la fase de modelos.
 
----
 
 ### 2. Punto de partida y split train/test
 
@@ -210,7 +209,6 @@ Sobre este dataset se ha realizado:
 
 A partir de este punto, **todo el análisis de heterogeneidad** se ha realizado exclusivamente sobre el **conjunto de entrenamiento**, respetando la separación train/test de cara a los futuros modelos supervisados.
 
----
 
 ### 3. Estudio de heterogeneidad en nonMalignant (EDA no supervisado)
 
@@ -238,7 +236,6 @@ Sobre este subconjunto se ha implementado un pipeline de análisis no supervisad
      - PC1–PC2 para una primera visión global.
      - UMAP sobre el espacio PCA (2D), para explorar la estructura local y posibles subgrupos dentro de nonMalignant.
 
----
 
 ### 4. Clustering no supervisado y selección de modelo
 
@@ -268,7 +265,6 @@ Tras restringir la búsqueda a configuraciones razonables, la solución seleccio
 
 Se ha añadido la columna `cluster_auto` a los metadatos de nonMalignant (`meta_nm`) y se ha propagado a los metadatos de entrenamiento (`meta_train`) como información descriptiva sobre la estructura interna de nonMalignant.
 
----
 
 ### 5. Asociación de clusters con metadatos
 
@@ -282,7 +278,6 @@ De forma cualitativa:
   - Posibles efectos de centro/lote.
 - Edad y sexo no explican la separación de clusters.
 
----
 
 ### 6. Caracterización de los clusters nonMalignant
 
@@ -313,7 +308,6 @@ Se ha ejecutado este flujo sobre `X_nm_log` y `meta_nm`, obteniendo:
 - Un DataFrame con los resultados de expresión diferencial entre los dos clusters nonMalignant.
 - Figuras/archivos en `reports/figures/nonmalignant/`, pensados para documentar el análisis en la memoria del TFM.
 
----
 
 ### 7. Detección de outliers en el espacio PCA de nonMalignant
 
@@ -329,7 +323,6 @@ Esta función:
 Con esto se ha generado:
 
 - Un flag booleano `is_outlier_pca` en los metadatos de nonMalignant (`meta_nm`).
----
 
 ### 8. Pipeline de feature engineering preparado (aún no utilizado en modelos)
 
@@ -369,7 +362,6 @@ Este pipeline está listo para ser utilizado de forma consistente en:
 
 Todavía **no se ha integrado** en los notebooks de clasificación binaria: se utilizará en la siguiente fase, cuando se monten los primeros modelos supervisados.
 
----
 
 ### 9. Decisiones de diseño y cierre de la iteración
 
@@ -381,3 +373,5 @@ Todavía **no se ha integrado** en los notebooks de clasificación binaria: se u
 - Todo el análisis no supervisado (clustering, outliers, DE entre clusters) se ha realizado únicamente sobre el **conjunto de entrenamiento**, manteniendo la separación train/test para la futura evaluación de los modelos.
 
 Con estos pasos se da por **cerrada la parte de heterogeneidad en el grupo nonMalignant** y queda preparado el diseño del **feature engineering**. La siguiente etapa del proyecto se centrará en la construcción y evaluación de los modelos de **clasificación binaria**.
+
+---
