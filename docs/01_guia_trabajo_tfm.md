@@ -179,6 +179,8 @@ Estos datos son los mismos que utilizó la alumna anterior, y se usan aquí como
 2. Entrenar los primeros modelos de clasificación (binaria y, posteriormente, multiclase).
 3. Una vez consolidado este flujo con GSE183635, **buscar y añadir nuevos datasets de características similares** para ampliar el conjunto de datos, mejorar la robustez de los modelos y explorar mejor la generalización del enfoque.
 
+---
+
 ## Iteración 2: Estudio de heterogeneidad en nonMalignant y preparación del feature engineering rama (feat-feature_engineering)
 
 ### 1. Objetivo de la iteración
