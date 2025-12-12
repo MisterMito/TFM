@@ -12,11 +12,14 @@ from sklearn.metrics import (
 )
 
 from pathlib import Path
-from typing import Sequence, Tuple, Optional
+from typing import Sequence, Tuple, Optional, Union
 
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import ttest_ind
+import umap
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 
 
 def evaluate_clustering(X, labels):
@@ -415,3 +418,174 @@ def flag_pca_distance_outliers(
     flags = dists >= thresh
 
     return pd.Series(flags, index=X_pca.index, name="is_outlier_pca")
+
+
+def compute_umap_from_pca(
+    X_pca,
+    n_neighbors=15,
+    min_dist=0.3,
+    random_state=42
+):
+    """
+    Aplica UMAP sobre el espacio PCA.
+    X_pca: array (n_samples, n_components_pca)
+    Devuelve: X_umap (n_samples, 2)
+    """
+    umap_model = umap.UMAP(
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        n_components=2,
+        random_state=random_state,
+    )
+    X_umap = umap_model.fit_transform(X_pca)
+    return X_umap, umap_model
+
+
+def plot_umap(
+    X_umap: Union[np.ndarray, pd.DataFrame],
+    color: Optional[Union[pd.Series, np.ndarray, list]] = None,
+    title: str = "UMAP",
+    xlabel: str = "UMAP 1",
+    ylabel: str = "UMAP 2",
+    cmap: Optional[str] = None,
+    is_categorical: Optional[bool] = None,
+    figsize: Tuple[int, int] = (6, 5),
+    legend: bool = True,
+) -> None:
+    """
+    Scatter de UMAP que admite tanto variables numéricas como categóricas para colorear.
+
+    Parámetros
+    ----------
+    X_umap : array-like (n_samples, 2)
+        Coordenadas UMAP (2D).
+    color : Series/array/list, opcional
+        Variable para colorear los puntos (numérica o categórica).
+    title, xlabel, ylabel : str
+        Títulos y etiquetas de los ejes.
+    cmap : str, opcional
+        Nombre del colormap de matplotlib a usar.
+        - Numérica: se usa como mapa continuo.
+        - Categórica: se usa como mapa discreto (ej. 'tab10', 'tab20').
+        Si None, se elige un valor por defecto razonable.
+    is_categorical : bool, opcional
+        Forzar tratamiento como categórica (True) o numérica (False).
+        Si None, se intenta inferir automáticamente.
+    figsize : (int, int)
+        Tamaño de la figura.
+    legend : bool
+        Si True, muestra leyenda para variables categóricas.
+    """
+    # Asegurar array 2D
+    if isinstance(X_umap, pd.DataFrame):
+        coords = X_umap.values
+    else:
+        coords = np.asarray(X_umap)
+
+    if coords.shape[1] != 2:
+        raise ValueError(f"X_umap debe tener shape (n_samples, 2), recibido {coords.shape}")
+
+    plt.figure(figsize=figsize)
+
+    if color is None:
+        # Caso sin color: todo en un solo color
+        plt.scatter(coords[:, 0], coords[:, 1], alpha=0.7)
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+        plt.title(title)
+        plt.tight_layout()
+        plt.show()
+        return
+
+    # Convertir color a Series para facilitar manejo
+    if isinstance(color, pd.Series):
+        color_series = color
+    else:
+        color_series = pd.Series(color, index=None)
+
+    # Inferir si es categórica o numérica si no se especifica
+    if is_categorical is None:
+        if pd.api.types.is_numeric_dtype(color_series):
+            # Numérica pura
+            is_categorical = False
+        else:
+            # No numérica (object, category, etc.)
+            is_categorical = True
+
+        # Heurística adicional: pocas categorías distintas => tratamos como categórica
+        n_unique = color_series.nunique(dropna=True)
+        if n_unique <= 20:
+            # Sobre-escribimos a categórica
+            is_categorical = True
+
+    # Caso 1: variable numérica
+
+    if not is_categorical:
+        if cmap is None:
+            cmap = "viridis"
+
+        scatter = plt.scatter(
+            coords[:, 0],
+            coords[:, 1],
+            c=color_series.values,
+            alpha=0.7,
+            cmap=cmap,
+        )
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+        plt.title(title)
+        cbar = plt.colorbar(scatter)
+        cbar.set_label(str(color_series.name) if color_series.name is not None else "")
+        plt.tight_layout()
+        plt.show()
+        return
+
+    # Caso 2: variable categórica
+
+    # Convertimos a categoría explícita
+    cat = color_series.astype("category")
+    categories = cat.cat.categories
+    codes = cat.cat.codes.values  # -1 para NaN
+
+    n_cats = len(categories)
+
+    # Colormap discreto
+    if cmap is None:
+        cmap = "tab10" if n_cats <= 10 else "tab20"
+    base_cmap = cm.get_cmap(cmap, n_cats)
+
+    # Mapear códigos a colores (ignorando -1 de NaN)
+    norm = mcolors.Normalize(vmin=0, vmax=max(n_cats - 1, 1))
+    colors_mapped = np.full_like(codes, fill_value=np.nan, dtype=float)
+    mask_valid = codes >= 0
+    colors_mapped[mask_valid] = codes[mask_valid]
+
+    scatter = plt.scatter(
+        coords[:, 0],
+        coords[:, 1],
+        c=colors_mapped,
+        alpha=0.7,
+        cmap=base_cmap,
+        norm=norm,
+    )
+
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+
+    # Leyenda para categorías
+    if legend:
+        handles = []
+        labels = []
+        for i, cat_name in enumerate(categories):
+            color_i = base_cmap(norm(i))
+            handle = plt.Line2D(
+                [], [], marker="o", linestyle="",
+                markersize=6, markerfacecolor=color_i, markeredgecolor="none"
+            )
+            handles.append(handle)
+            labels.append(str(cat_name))
+        plt.legend(handles, labels, title=color_series.name, bbox_to_anchor=(1.05, 1), loc="upper left")
+
+    plt.tight_layout()
+    plt.show()
