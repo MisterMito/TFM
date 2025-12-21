@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -10,7 +10,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import yaml
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, SGDClassifier
+from sklearn.svm import LinearSVC
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
 from sklearn.metrics import (
     average_precision_score,
     balanced_accuracy_score,
@@ -106,8 +109,14 @@ class BinaryTrainConfig:
 
     # Outputs
     save_local_bundle: bool = True
+    save_plots: bool = True
+    mlflow_log_artifacts: bool = True
+    mlflow_log_model: bool = True
     output_models_dir: str = "models"
     output_figures_dir: str = "reports/figures/binary"
+
+    clf_name: str = "logreg"
+    clf_params: dict[str, Any] = field(default_factory=dict)
 
 
 def _ensure_dir(p: Path) -> None:
@@ -140,15 +149,60 @@ def _class_weight_from_pos_weight(pos_weight: float) -> dict[int, float]:
     # clase 0: nonMalignant, clase 1: Malignant
     return {0: 1.0, 1: float(pos_weight)}
 
+def build_classifier(cfg: BinaryTrainConfig):
+    cw = _class_weight_from_pos_weight(cfg.pos_weight)
+
+    if cfg.clf_name == "logreg":
+        return LogisticRegression(
+            C=cfg.clf_params.get("C", cfg.C),
+            solver=cfg.clf_params.get("solver", "liblinear"),
+            class_weight=cw,
+            max_iter=cfg.clf_params.get("max_iter", cfg.max_iter),
+            random_state=cfg.random_state,
+        )
+
+    if cfg.clf_name == "sgd_logloss":
+        # rápido y muy típico en alta dimensión
+        return SGDClassifier(
+            loss="log_loss",
+            alpha=cfg.clf_params.get("alpha", 1e-4),
+            penalty=cfg.clf_params.get("penalty", "l2"),
+            class_weight=cw,
+            max_iter=cfg.clf_params.get("max_iter", 2000),
+            random_state=cfg.random_state,
+        )
+
+    if cfg.clf_name == "linear_svc_calibrated":
+        base = LinearSVC(
+            C=cfg.clf_params.get("C", 1.0),
+            class_weight=cw,
+            random_state=cfg.random_state,
+        )
+        return CalibratedClassifierCV(base, method="sigmoid", cv=3)
+
+    if cfg.clf_name == "rf":
+        return RandomForestClassifier(
+            n_estimators=cfg.clf_params.get("n_estimators", 500),
+            max_depth=cfg.clf_params.get("max_depth", None),
+            class_weight=cw,
+            n_jobs=-1,
+            random_state=cfg.random_state,
+        )
+
+    if cfg.clf_name == "extratrees":
+        return ExtraTreesClassifier(
+            n_estimators=cfg.clf_params.get("n_estimators", 500),
+            max_depth=cfg.clf_params.get("max_depth", None),
+            class_weight=cw,
+            n_jobs=-1,
+            random_state=cfg.random_state,
+        )
+
+    raise ValueError(f"clf_name desconocido: {cfg.clf_name}")
+
 
 def build_pipeline(cfg: BinaryTrainConfig) -> Pipeline:
-    clf = LogisticRegression(
-        C=cfg.C,
-        solver="liblinear",
-        class_weight=_class_weight_from_pos_weight(cfg.pos_weight),
-        max_iter=cfg.max_iter,
-        random_state=cfg.random_state,
-    )
+    clf = build_classifier(cfg)
 
     selector = HighVarGeneSelector(var_quantile=cfg.var_quantile)
     log = Log1pTransformer()
@@ -358,8 +412,10 @@ def run_training(cfg: BinaryTrainConfig, feature_cols: list[str]) -> dict[str, A
 
         cm_path = artifact_dir / f"{cfg.model_name}_{cfg.model_version}_cm.png"
         pr_path = artifact_dir / f"{cfg.model_name}_{cfg.model_version}_pr.png"
-        plot_confusion(y_test, test_proba, threshold=chosen_thr, outpath=cm_path)
-        plot_pr(y_test, test_proba, outpath=pr_path)
+
+        if cfg.save_plots:
+            plot_confusion(y_test, test_proba, threshold=chosen_thr, outpath=cm_path)
+            plot_pr(y_test, test_proba, outpath=pr_path)
 
         # MLflow logging
         raw_params = asdict(cfg)
@@ -382,18 +438,21 @@ def run_training(cfg: BinaryTrainConfig, feature_cols: list[str]) -> dict[str, A
             "chosen_threshold": chosen_thr,
             }
 
-        mlflow.log_artifact(str(cm_path))
-        mlflow.log_artifact(str(pr_path))
+        if cfg.mlflow_log_artifacts and cfg.save_plots:
+            mlflow.log_artifact(str(cm_path))
+            mlflow.log_artifact(str(pr_path))
 
         # Modelo + signature (MLflow)
         input_example = X_train.head(3)
         signature = infer_signature(input_example, pipe.predict_proba(input_example)[:, 1])
-        mlflow.sklearn.log_model(
-            sk_model=pipe,
-            artifact_path="model",
-            signature=signature,
-            input_example=input_example,
-        )
+
+        if cfg.mlflow_log_model:
+            mlflow.sklearn.log_model(
+                sk_model=pipe,
+                artifact_path="model",
+                signature=signature,
+                input_example=input_example,
+            )
         signature_dict = signature.to_dict()
 
         # Sanitiza
