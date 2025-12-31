@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterable, Optional
 
 import numpy as np
 import pandas as pd
@@ -17,6 +17,46 @@ def _to_df(X) -> pd.DataFrame:
     raise TypeError(
         "Este pipeline espera pandas.DataFrame para mantener nombres de genes/columnas."
     )
+
+
+class FeatureColumnSelector(BaseEstimator, TransformerMixin):
+    """Asegura que las columnas de entrada (genes) estén presentes y en el orden esperado."""
+
+    def __init__(self, feature_cols: Iterable[str]):
+        self.feature_cols = feature_cols
+
+    def fit(self, X, y=None):
+        X_df = _to_df(X)
+        if self.feature_cols is None:
+            raise ValueError("FeatureColumnSelector requiere feature_cols definidos.")
+
+        feature_cols = list(self.feature_cols)
+        if not feature_cols:
+            raise ValueError("FeatureColumnSelector recibió feature_cols vacíos.")
+
+        missing = [c for c in feature_cols if c not in X_df.columns]
+        if missing:
+            raise ValueError(
+                "FeatureColumnSelector: faltan columnas en X: "
+                f"{missing[:10]} ..."
+            )
+        self.feature_names_in_ = feature_cols
+        return self
+
+    def transform(self, X):
+        check_is_fitted(self, "feature_names_in_")
+        X_df = _to_df(X)
+        missing = [c for c in self.feature_names_in_ if c not in X_df.columns]
+        if missing:
+            raise ValueError(
+                "FeatureColumnSelector: faltan columnas en X: "
+                f"{missing[:10]} ..."
+            )
+        return X_df.loc[:, self.feature_names_in_]
+
+    def get_feature_names_out(self, input_features=None):
+        check_is_fitted(self, "feature_names_in_")
+        return np.array(self.feature_names_in_, dtype=object)
 
 
 class HighVarGeneSelector(BaseEstimator, TransformerMixin):
