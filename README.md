@@ -9,6 +9,12 @@ Proyecto centrado en datos de **ARN mensajero de plaquetas** (*platelet RNA / tu
 
 ---
 
+## Metodología
+
+Una metodología iterativa e incremental, inspirada en CRISP-DM y en buenas prácticas de MLOps, donde el trabajo se organiza en sprints claramente delimitadas. Cada iteración produce un resultado end-to-end (pipeline de datos, análisis exploratorio, modelo supervisado, etc.), que se documenta y versiona, garantizando reproducibilidad y trazabilidad.
+
+---
+
 ## Contexto
 
 Este TFM se sitúa en la intersección entre genómica y ML/DL, utilizando perfiles de expresión génica en plaquetas para estudiar su utilidad como biomarcadores de cáncer.
