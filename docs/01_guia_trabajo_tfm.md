@@ -375,3 +375,171 @@ Todavía **no se ha integrado** en los notebooks de clasificación binaria: se u
 Con estos pasos se da por **cerrada la parte de heterogeneidad en el grupo nonMalignant** y queda preparado el diseño del **feature engineering**. La siguiente etapa del proyecto se centrará en la construcción y evaluación de los modelos de **clasificación binaria**.
 
 ---
+
+## Iteración 3: Modelos binarios (Malignant vs nonMalignant) con pipeline reproducible y tracking en MLflow (feat/binary_model)
+
+### 1. Objetivo de la iteración
+
+En esta iteración se ha construido y dejado operativo el flujo completo para entrenar y evaluar modelos supervisados binarios (cáncer vs no cáncer) sobre el dataset procesado, integrando:
+
+- El **feature engineering** dentro de un pipeline reproducible estilo scikit-learn.
+- El **tracking de experimentos** con MLflow.
+- Una lógica explícita de **selección de umbral** orientada a reducir falsos negativos.
+
+El objetivo es dejar preparado un “marco” estable de entrenamiento binario sobre el que se puedan iterar modelos y, posteriormente, extender el enfoque a clasificación multiclase.
+
+
+### 2. Definición del problema y etiquetas
+
+Se fijó el problema binario como:
+
+- `y = 1` si `Class_group == "Malignant"`
+- `y = 0` si `Class_group == "nonMalignant"`
+
+Se mantuvo la **separación train/test** definida en iteraciones anteriores, sin modificar los splits ya establecidos.
+
+
+### 3. Integración del feature engineering en un pipeline end-to-end
+
+El preprocesado de expresión se migró a un enfoque completamente integrado en un **scikit-learn Pipeline**, con el objetivo de:
+
+- Evitar fugas de información (leakage) durante validación cruzada.
+- Poder entrenar, validar y guardar el modelo como un único objeto serializable.
+- Facilitar el despliegue y la reutilización del modelo en otros entornos.
+
+El pipeline incluye etapas para:
+
+- **Selección de genes** (por ejemplo, por varianza).
+- **Transformación logarítmica** de la expresión (`log1p`).
+- **Estandarización** (StandardScaler).
+- **PCA opcional**, con selección automática del número de componentes cuando se usa esta reducción de dimensionalidad.
+
+Dado que el dataset mezcla **genes** y **metadatos**, se añadió además una etapa explícita para fijar qué columnas de entrada se consideran features de expresión.
+
+
+### 4. Control explícito de columnas (genes vs metadatos)
+
+Para evitar ambigüedades y errores en la construcción de features, se definió de forma clara:
+
+- Una lista `metadata_cols` con las columnas de metadatos/variables clínicas y de control.
+- Un criterio sistemático para identificar columnas de genes (por ejemplo, identificadores ENSG…).
+
+A partir de esto:
+
+- Se asegura que el pipeline trabaje siempre con la lista correcta de columnas de expresión.
+- Se añadió un transformador específico (`FeatureColumnSelector`) dentro del pipeline para **fijar las columnas de entrada** y evitar problemas en validación cruzada (por ejemplo, con `cross_val_predict`), donde las estructuras de DataFrame pueden variar si no se controlan bien las columnas.
+
+
+### 5. Métricas y foco clínico: minimizar falsos negativos
+
+Se definió como prioridad del problema binario el **control de falsos negativos**, es decir:
+
+- Minimizar la tasa de falsos negativos (FNR = 1 − recall/sensibilidad).
+
+Además de métricas estándar (ROC-AUC, PR-AUC, F1, balanced accuracy), se incorporó un conjunto de métricas más alineadas con un uso clínico:
+
+- Número de FN y FNR.
+- Sensibilidad (recall) y especificidad.
+- Matriz de confusión y métricas derivadas (precision, NPV, FPR, etc.).
+
+Esto permite evaluar no solo la “calidad global” del modelo, sino también su comportamiento en escenarios donde detectar correctamente casos Malignant es más importante que reducir falsos positivos.
+
+
+### 6. Selección de umbral orientada a sensibilidad y especificidad
+
+En lugar de utilizar simplemente el umbral estándar de 0.5, se introdujo un mecanismo de **selección de umbral configurable** (`threshold_objective`), basado en la curva ROC.
+
+La lógica permite:
+
+- Explorar distintos puntos sobre la curva ROC.
+- Elegir umbrales que **maximicen la especificidad** bajo una condición mínima de recall (priorizando así el control de falsos negativos).
+- Separar claramente:
+  - La evaluación de la calidad del ranking del modelo (AUC).
+  - La elección del punto de decisión clínicamente relevante (threshold).
+
+De esta forma, el modelo puede tener un buen ranking global, pero el punto operativo concreto se ajusta explícitamente a las necesidades del problema.
+
+
+### 7. Entrenamiento y comparación de múltiples clasificadores
+
+Se amplió el enfoque desde un baseline inicial (por ejemplo, una regresión logística) a un conjunto más amplio de clasificadores, permitiendo barrer:
+
+- Distintos algoritmos de clasificación.
+- Diferentes **pesos de clase** o penalización de la clase positiva (Malignant).
+- Variantes de preprocesado (con y sin PCA, distintos quantiles de varianza, etc.).
+- Hiperparámetros específicos de cada modelo.
+
+El barrido se configuró con **validación cruzada** (por defecto, `cv_splits = 8`) para:
+
+- Estimar la estabilidad de las métricas.
+- Evitar sobreajuste a una única partición train/val.
+- Comparar modelos bajo un procedimiento homogéneo.
+
+
+### 8. Gestión de outputs locales y reducción de “ruido”
+
+Durante esta iteración se revisó qué artefactos se generan localmente al entrenar y hacer tracking. Se distinguió entre:
+
+- Información que interesa preservar y versionar (modelo final, métricas agregadas, configuración).
+- Ficheros de trabajo internos (por ejemplo, una base de datos SQLite local tipo `mlflow.db`) que no deben acabar en el control de versiones ni en `notebooks/`.
+
+Se trabajó para:
+
+- Centralizar la **trazabilidad de experimentos en MLflow**.
+- Mantener el repositorio más limpio, guardando únicamente lo necesario como resultado estable (bundle del modelo).
+
+
+### 9. Estructura de guardado del modelo y bundle final
+
+El guardado del resultado se consolidó en un **bundle de modelo**, que incluye:
+
+- El **pipeline completo** (preprocesado + clasificador) serializado en un único fichero, por ejemplo `model.pkl`.
+- Métricas y parámetros relevantes del experimento.
+- Información de firma y ejemplos de entrada cuando aplica.
+
+Además, se añadió una **copia completa del modelo en formato MLflow**, incluyendo:
+
+- `MLmodel`
+- `conda.yaml` u otro descriptor de entorno
+- `input_example`
+
+Este bundle dual (pickle + MLflow) facilita:
+
+- El uso directo del modelo en el propio proyecto.
+- La posibilidad de desplegarlo en entornos compatibles con MLflow.
+
+Se añadió una validación en notebook para comprobar que el bundle final contiene tanto el `MLmodel` como el `model.pkl` esperados.
+
+
+### 10. Notebook de baselines y pruebas de robustez
+
+Se actualizó el notebook:
+
+- `notebooks/3.0-ssic-binary-baselines.ipynb`
+
+para:
+
+- Ejecutar una **malla más amplia** de experimentos binarios.
+- Recopilar, ordenar y mostrar los resultados en un **DataFrame resumen** que permita seleccionar el mejor candidato.
+- Incluir una prueba más exigente (“pesada”):
+  - Reentrenar el mejor modelo con **validación cruzada más estricta** (por ejemplo, `CV = 10`).
+  - Aumentar límites como `max_iter` para asegurar convergencia.
+  - Comparar las métricas de esta versión “refinada” con la versión estándar usada en el bundle final.
+
+
+### 11. Resultado final de la iteración y siguientes pasos
+
+Al finalizar esta iteración queda definido un flujo reproducible para:
+
+- Preparar correctamente las features (separando genes de metadatos).
+- Entrenar múltiples modelos binarios con validación cruzada.
+- Elegir un umbral de decisión orientado a **reducir falsos negativos** y controlar la especificidad.
+- Registrar experimentos y resultados en **MLflow**.
+- Guardar un único **artefacto final** (bundle) listo para versionado y uso posterior.
+
+Con esto, la Iteración 3 deja establecido el **marco de entrenamiento binario** y el sistema de tracking/versionado. Los siguientes pasos se centrarán en:
+
+- Consolidar el mejor modelo binario según criterios clínicos definidos.
+- Extender la misma metodología (pipeline + MLflow + selección de umbral) a problemas de **clasificación multiclase** (tipos de cáncer).
+
+---

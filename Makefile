@@ -57,6 +57,12 @@ precommit:
 .PHONY: check
 check: lint test
 
+# Añadir target
+.PHONY: train-binary
+train-binary:
+	python -m genomics_dl.models.train_binary
+
+
 ## Set up Python interpreter environment (optional; uv sync usually suffices)
 .PHONY: create_environment
 create_environment:

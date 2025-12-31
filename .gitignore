@@ -189,3 +189,15 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# MLflow local tracking
+mlruns/
+
+
+# Modelos intermedios
+models/logreg_binary_pca*_pw*/
+models/*_sweep*/
+
+# Bbdd de SQLite de MLflow
+mlflow.db
+*.db
