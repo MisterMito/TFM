@@ -193,10 +193,6 @@ cython_debug/
 # MLflow local tracking
 mlruns/
 
-# Figuras generadas en barridos
-
-reports/figures/binary/*
-!reports/figures/binary/final_*
 
 # Modelos intermedios
 models/logreg_binary_pca*_pw*/
