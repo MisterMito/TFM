@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -23,6 +25,7 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
     roc_auc_score,
+    roc_curve,
 )
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.pipeline import Pipeline
@@ -32,6 +35,7 @@ import mlflow.sklearn
 from mlflow.models.signature import infer_signature
 
 from genomics_dl.features_sklearn import (
+    FeatureColumnSelector,
     HighVarGeneSelector,
     Log1pTransformer,
     PandasStandardScaler,
@@ -102,6 +106,7 @@ class BinaryTrainConfig:
     # CV / threshold
     cv_splits: int = 5
     min_recall_for_threshold: Optional[float] = 0.95  # Si None -> usa 0.5
+    threshold_objective: str = "specificity"  # specificity, balanced_accuracy, highest_threshold
 
     # MLflow
     experiment_name: str = "gse183635_binary"
@@ -201,7 +206,7 @@ def build_classifier(cfg: BinaryTrainConfig):
     raise ValueError(f"clf_name desconocido: {cfg.clf_name}")
 
 
-def build_pipeline(cfg: BinaryTrainConfig) -> Pipeline:
+def build_pipeline(cfg: BinaryTrainConfig, feature_cols: list[str]) -> Pipeline:
     clf = build_classifier(cfg)
 
     selector = HighVarGeneSelector(var_quantile=cfg.var_quantile)
@@ -213,7 +218,7 @@ def build_pipeline(cfg: BinaryTrainConfig) -> Pipeline:
         random_state=cfg.random_state,
     )
 
-    steps: list[tuple[str, Any]] = []
+    steps: list[tuple[str, Any]] = [("ensure_features", FeatureColumnSelector(feature_cols))]
     if cfg.selector_on_log:
         steps.extend([("log1p", log), ("select", selector), ("scale", scale)])
     else:
@@ -263,18 +268,55 @@ def compute_binary_metrics(y_true: np.ndarray, y_proba: np.ndarray, threshold: f
     }
 
 
-def choose_threshold_for_min_recall(y_true: np.ndarray, y_proba: np.ndarray, min_recall: float) -> float:
+def choose_threshold_for_min_recall(
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    min_recall: Optional[float],
+    objective: str = "specificity",
+) -> float:
     """
-    Elige el umbral más alto que mantenga recall >= min_recall.
-    (Umbral más alto -> suele reducir FP, manteniendo sensibilidad objetivo si es posible)
+    Selecciona el umbral que maximiza la métrica solicitada cumpliendo recall >= min_recall.
+    objective:
+        - 'specificity': maximiza especificidad.
+        - 'balanced_accuracy': maximiza balanced accuracy.
+        - 'highest_threshold': replica comportamiento previo (umbral más alto disponible).
     """
-    precision, recall, thresholds = precision_recall_curve(y_true, y_proba)
-    # thresholds tiene len = len(precision)-1
-    valid = np.where(recall[:-1] >= min_recall)[0]
-    if len(valid) == 0:
-        # No se puede alcanzar ese recall con este modelo (según estas probabilidades)
+    if min_recall is None:
         return 0.5
-    return float(thresholds[valid].max())
+
+    min_recall = float(min_recall)
+
+    from sklearn.metrics import roc_curve
+
+    fpr, tpr, thresholds = roc_curve(y_true, y_proba)
+    specificities = 1.0 - fpr
+    balanced = 0.5 * (tpr + specificities)
+
+    # Filtramos por recall mínimo
+    mask = tpr >= min_recall
+    if not np.any(mask):
+        return 0.5
+
+    candidate_idx = np.where(mask)[0]
+
+    if objective == "highest_threshold":
+        candidate_thresholds = thresholds[candidate_idx]
+        best_rel_idx = np.argmax(candidate_thresholds)
+    elif objective == "balanced_accuracy":
+        candidate_scores = balanced[candidate_idx]
+        best_rel_idx = np.argmax(candidate_scores)
+    elif objective == "specificity":
+        candidate_scores = specificities[candidate_idx]
+        best_rel_idx = np.argmax(candidate_scores)
+    else:
+        raise ValueError(f"Objetivo de threshold desconocido: {objective}")
+
+    best_idx = candidate_idx[best_rel_idx]
+    chosen = thresholds[best_idx]
+    if not np.isfinite(chosen):
+        # roc_curve arranca en inf, que no es útil
+        return 1.0
+    return float(chosen)
 
 
 # Plots (artefactos)
@@ -316,6 +358,35 @@ def plot_pr(y_true: np.ndarray, y_proba: np.ndarray, outpath: Path) -> None:
 
 
 # Saving bundle (models/)
+def _persist_mlflow_local_model(
+    pipeline: Pipeline,
+    signature,
+    input_example: pd.DataFrame,
+    destination: Path,
+) -> None:
+    """
+    Guarda una copia local con formato MLflow (MLmodel + data/) sin tocar el tracking server.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_model_dir = Path(tmpdir) / "mlflow_model"
+        mlflow.sklearn.save_model(
+            sk_model=pipeline,
+            path=str(tmp_model_dir),
+            signature=signature,
+            input_example=input_example,
+        )
+        for item in tmp_model_dir.iterdir():
+            target = destination / item.name
+            if item.is_dir():
+                if target.exists():
+                    shutil.rmtree(target)
+                shutil.copytree(item, target)
+            else:
+                if target.exists():
+                    target.unlink()
+                shutil.copy2(item, target)
+
+
 def save_model_bundle(
     out_root: Path,
     model_name: str,
@@ -324,6 +395,8 @@ def save_model_bundle(
     metrics: dict[str, Any],
     params: dict[str, Any],
     signature_dict: dict[str, Any],
+    signature,
+    input_example: pd.DataFrame,
     mlflow_run_id: Optional[str],
 ) -> Path:
     out_dir = out_root / model_name / model_version
@@ -331,6 +404,7 @@ def save_model_bundle(
 
     # modelo
     joblib.dump(pipeline, out_dir / "model.pkl")
+    _persist_mlflow_local_model(pipeline, signature, input_example, out_dir)
 
     # métricas / params
     with open(out_dir / "metrics.json", "w", encoding="utf-8") as f:
@@ -354,6 +428,7 @@ def save_model_bundle(
                 "",
                 "## Artifacts",
                 "- model.pkl (sklearn Pipeline completo)",
+                "- MLmodel + entorno MLflow",
                 "- metrics.json",
                 "- params.yaml",
                 "- signature.json",
@@ -381,7 +456,7 @@ def run_training(cfg: BinaryTrainConfig, feature_cols: list[str]) -> dict[str, A
     X_train, y_train = build_xy(df_train, cfg.label_col, cfg.positive_label, feature_cols)
     X_test, y_test = build_xy(df_test, cfg.label_col, cfg.positive_label, feature_cols)
 
-    pipe = build_pipeline(cfg)
+    pipe = build_pipeline(cfg, feature_cols=feature_cols)
 
     cv = StratifiedKFold(n_splits=cfg.cv_splits, shuffle=True, random_state=cfg.random_state)
 
@@ -391,12 +466,12 @@ def run_training(cfg: BinaryTrainConfig, feature_cols: list[str]) -> dict[str, A
         # OOF proba (para seleccionar umbral y métricas CV sin leakage)
         oof_proba = cross_val_predict(pipe, X_train, y_train, cv=cv, method="predict_proba")[:, 1]
 
-        if cfg.min_recall_for_threshold is None:
-            chosen_thr = 0.5
-        else:
-            chosen_thr = choose_threshold_for_min_recall(
-                y_train, oof_proba, min_recall=cfg.min_recall_for_threshold
-            )
+        chosen_thr = choose_threshold_for_min_recall(
+            y_train,
+            oof_proba,
+            min_recall=cfg.min_recall_for_threshold,
+            objective=cfg.threshold_objective,
+        )
 
         cv_metrics = compute_binary_metrics(y_train, oof_proba, threshold=chosen_thr)
 
@@ -471,6 +546,8 @@ def run_training(cfg: BinaryTrainConfig, feature_cols: list[str]) -> dict[str, A
                 metrics={"cv": cv_metrics, "test": test_metrics, "chosen_threshold": chosen_thr},
                 params=params,
                 signature_dict=signature_dict,
+                signature=signature,
+                input_example=input_example,
                 mlflow_run_id=run_id,
             )
 
