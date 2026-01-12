@@ -254,7 +254,7 @@ def build_classifier(cfg: MulticlassTrainConfig, y_train: np.ndarray):
             random_state=cfg.random_state,
         )
         # CalibratedClassifierCV aporta predict_proba
-        return CalibratedClassifierCV(base, method="sigmoid", cv=3)
+        return CalibratedClassifierCV(base, method="sigmoid", cv=3, n_jobs=-1)
 
     if cfg.clf_name == "rf":
         return RandomForestClassifier(
@@ -650,7 +650,7 @@ def run_training(cfg: MulticlassTrainConfig, feature_cols: list[str]) -> dict[st
         mlflow.log_params({k: _to_serializable(v) for k, v in params.items()})
 
         # OOF proba (CV)
-        oof_proba = cross_val_predict(pipe, X_train, y_train, cv=cv, method="predict_proba", params=cv_params)
+        oof_proba = cross_val_predict(pipe, X_train, y_train, cv=cv, method="predict_proba", params=cv_params, n_jobs=4)
         classes = np.unique(y_train.astype(str))
         if oof_proba.shape[1] != len(classes):
             # fallback: entrenamos una vez para obtener el orden real
