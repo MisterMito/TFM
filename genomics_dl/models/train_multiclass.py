@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import yaml
+from sklearn.base import BaseEstimator
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression, SGDClassifier
@@ -41,6 +42,7 @@ from genomics_dl.features_sklearn import (
     Log1pTransformer,
     PandasStandardScaler,
     PCAAuto,
+    VarianceThresholdFilter,
 )
 
 
@@ -187,6 +189,63 @@ class MulticlassTrainConfig:
     random_state: int = 42
 
 
+@dataclass(frozen=True)
+class HierarchicalTrainConfig:
+    """Configuración para clasificación jerárquica de dos etapas."""
+
+    # Rutas de datos
+    train_path: str
+    test_path: str
+
+    # Configuración de etiquetas
+    class_group_col: str = "Class_group"
+    patient_group_col: str = "Patient_group"
+    nonmalignant_label: str = "nonMalignant"
+    malignant_label: str = "Malignant"
+
+    # Identificación del modelo
+    model_name: str = "hierarchical_multiclass"
+    model_version: str = "v0.3.0"
+
+    # Etapa 1: Detección binaria de cáncer (cancer vs nonMalignant)
+    stage1_clf_name: str = "xgboost"  # xgboost, lightgbm, catboost, extratrees
+    stage1_clf_params: dict[str, Any] = field(default_factory=dict)
+    stage1_min_recall: float = 0.95  # Objetivo de alto recall
+    stage1_threshold_objective: str = "specificity"
+    stage1_pos_weight: Optional[float] = None  # Auto-calcular si es None
+
+    # Etapa 2: Clasificación de tipo de cáncer (18 tipos)
+    stage2_clf_name: str = "xgboost"
+    stage2_clf_params: dict[str, Any] = field(default_factory=dict)
+    stage2_class_weighting: str = "balanced"  # balanced, sqrt, log, custom
+    stage2_custom_weights: Optional[dict[str, float]] = None
+    stage2_use_smote: bool = False  # Experimental: para clases raras
+
+    # Ingeniería de características (compartida)
+    use_pca: bool = False
+    var_quantile: float = 0.15
+    selector_on_log: bool = False
+    pca_var_threshold: float = 0.9
+    max_pca_components: Optional[int] = None
+    variance_filter_threshold: float = 1e-6  # NUEVO: prevenir NaN
+
+    # Validación cruzada
+    cv_splits: int = 8
+    random_state: int = 42
+
+    # MLflow
+    experiment_name: str = "gse183635_hierarchical"
+    tracking_uri: Optional[str] = None
+
+    # Salidas
+    save_local_bundle: bool = True
+    save_plots: bool = True
+    mlflow_log_artifacts: bool = True
+    mlflow_log_model: bool = True
+    output_models_dir: str = "models"
+    output_figures_dir: str = "reports/figures/hierarchical"
+
+
 def _build_class_weight(cfg: MulticlassTrainConfig, y_train: np.ndarray) -> Optional[dict[str, float]]:
     """
     Construye class_weight SOLO si weighting_strategy == "class_weight".
@@ -244,6 +303,11 @@ def build_classifier(cfg: MulticlassTrainConfig, y_train: np.ndarray):
             penalty=cfg.clf_params.get("penalty", "l2"),
             class_weight=cw,
             max_iter=cfg.clf_params.get("max_iter", 4000),
+            tol=cfg.clf_params.get("tol", 1e-3),
+            early_stopping=cfg.clf_params.get("early_stopping", True),
+            validation_fraction=cfg.clf_params.get("validation_fraction", 0.1),
+            n_iter_no_change=cfg.clf_params.get("n_iter_no_change", 5),
+            average=cfg.clf_params.get("average", True),
             random_state=cfg.random_state,
         )
 
@@ -779,3 +843,291 @@ def run_training(cfg: MulticlassTrainConfig, feature_cols: list[str]) -> dict[st
             "bundle_dir": (str(out_bundle_dir) if out_bundle_dir is not None else None),
             "classes": list(classes_fitted),
         }
+
+
+# ============================================================================
+# FUNCIONES PARA CLASIFICACIÓN JERÁRQUICA DE DOS ETAPAS
+# ============================================================================
+
+
+def compute_class_weights_hierarchical(
+    y: np.ndarray,
+    strategy: str = "balanced",
+    custom_weights: Optional[dict[str, float]] = None
+) -> dict[str, float]:
+    """
+    Calcula pesos por clase para clasificación multiclase desbalanceada.
+
+    Estrategias:
+    - balanced: n_samples / (n_classes * class_count)
+    - sqrt: sqrt(max_count / class_count)
+    - log: log(1 + max_count / class_count)
+    - custom: pesos proporcionados por el usuario
+    """
+    if strategy == "custom" and custom_weights:
+        return {str(k): float(v) for k, v in custom_weights.items()}
+
+    from collections import Counter
+    counts = Counter(y)
+    n_samples, n_classes = len(y), len(counts)
+
+    if strategy == "balanced":
+        return {str(cls): n_samples / (n_classes * count)
+                for cls, count in counts.items()}
+    elif strategy == "sqrt":
+        max_count = max(counts.values())
+        return {str(cls): np.sqrt(max_count / count)
+                for cls, count in counts.items()}
+    elif strategy == "log":
+        max_count = max(counts.values())
+        return {str(cls): np.log1p(max_count / count)
+                for cls, count in counts.items()}
+    else:
+        raise ValueError(f"Estrategia de pesos desconocida: {strategy}")
+
+
+def build_stage1_binary_classifier(
+    cfg: HierarchicalTrainConfig,
+    n_malignant: int,
+    n_nonmalignant: int
+) -> Any:
+    """Construye clasificador binario para detección de cáncer (Etapa 1)."""
+
+    # Auto-calcular peso positivo si no se especifica
+    scale_pos_weight = (
+        cfg.stage1_pos_weight if cfg.stage1_pos_weight
+        else n_nonmalignant / n_malignant
+    )
+
+    if cfg.stage1_clf_name == "xgboost":
+        import xgboost as xgb
+        return xgb.XGBClassifier(
+            n_estimators=cfg.stage1_clf_params.get("n_estimators", 500),
+            max_depth=cfg.stage1_clf_params.get("max_depth", 6),
+            learning_rate=cfg.stage1_clf_params.get("learning_rate", 0.1),
+            subsample=cfg.stage1_clf_params.get("subsample", 0.8),
+            colsample_bytree=cfg.stage1_clf_params.get("colsample_bytree", 0.8),
+            gamma=cfg.stage1_clf_params.get("gamma", 1.0),
+            min_child_weight=cfg.stage1_clf_params.get("min_child_weight", 5),
+            scale_pos_weight=scale_pos_weight,
+            objective="binary:logistic",
+            eval_metric="logloss",
+            random_state=cfg.random_state,
+            n_jobs=-1,
+            tree_method="hist",
+        )
+
+    elif cfg.stage1_clf_name == "lightgbm":
+        import lightgbm as lgb
+        return lgb.LGBMClassifier(
+            n_estimators=cfg.stage1_clf_params.get("n_estimators", 500),
+            max_depth=cfg.stage1_clf_params.get("max_depth", 6),
+            learning_rate=cfg.stage1_clf_params.get("learning_rate", 0.1),
+            subsample=cfg.stage1_clf_params.get("subsample", 0.8),
+            colsample_bytree=cfg.stage1_clf_params.get("colsample_bytree", 0.8),
+            scale_pos_weight=scale_pos_weight,
+            objective="binary",
+            random_state=cfg.random_state,
+            n_jobs=-1,
+            verbose=-1,
+        )
+
+    elif cfg.stage1_clf_name == "catboost":
+        from catboost import CatBoostClassifier
+        return CatBoostClassifier(
+            iterations=cfg.stage1_clf_params.get("iterations", 500),
+            depth=cfg.stage1_clf_params.get("depth", 6),
+            learning_rate=cfg.stage1_clf_params.get("learning_rate", 0.1),
+            scale_pos_weight=scale_pos_weight,
+            loss_function="Logloss",
+            random_state=cfg.random_state,
+            thread_count=-1,
+            verbose=False,
+        )
+
+    elif cfg.stage1_clf_name == "extratrees":
+        class_weight = {0: 1.0, 1: scale_pos_weight}
+        return ExtraTreesClassifier(
+            n_estimators=cfg.stage1_clf_params.get("n_estimators", 800),
+            max_depth=cfg.stage1_clf_params.get("max_depth", None),
+            class_weight=class_weight,
+            n_jobs=-1,
+            random_state=cfg.random_state,
+        )
+
+    else:
+        raise ValueError(f"Nombre de clasificador stage1 desconocido: {cfg.stage1_clf_name}")
+
+
+def build_stage2_multiclass_classifier(
+    cfg: HierarchicalTrainConfig,
+    y_cancer: np.ndarray
+) -> Any:
+    """Construye clasificador multiclase para tipos de cáncer (Etapa 2)."""
+
+    class_weights = compute_class_weights_hierarchical(
+        y_cancer,
+        strategy=cfg.stage2_class_weighting,
+        custom_weights=cfg.stage2_custom_weights
+    )
+
+    if cfg.stage2_clf_name == "xgboost":
+        import xgboost as xgb
+        # XGBoost usa sample_weight en fit(), no class_weight como parámetro
+        return xgb.XGBClassifier(
+            n_estimators=cfg.stage2_clf_params.get("n_estimators", 500),
+            max_depth=cfg.stage2_clf_params.get("max_depth", 8),
+            learning_rate=cfg.stage2_clf_params.get("learning_rate", 0.05),
+            subsample=cfg.stage2_clf_params.get("subsample", 0.8),
+            colsample_bytree=cfg.stage2_clf_params.get("colsample_bytree", 0.8),
+            gamma=cfg.stage2_clf_params.get("gamma", 1.0),
+            objective="multi:softprob",
+            random_state=cfg.random_state,
+            n_jobs=-1,
+            tree_method="hist",
+        )
+
+    elif cfg.stage2_clf_name == "lightgbm":
+        import lightgbm as lgb
+        return lgb.LGBMClassifier(
+            n_estimators=cfg.stage2_clf_params.get("n_estimators", 500),
+            max_depth=cfg.stage2_clf_params.get("max_depth", 8),
+            learning_rate=cfg.stage2_clf_params.get("learning_rate", 0.05),
+            class_weight=class_weights,  # LightGBM soporta dict
+            objective="multiclass",
+            random_state=cfg.random_state,
+            n_jobs=-1,
+            verbose=-1,
+        )
+
+    elif cfg.stage2_clf_name == "catboost":
+        from catboost import CatBoostClassifier
+        return CatBoostClassifier(
+            iterations=cfg.stage2_clf_params.get("iterations", 500),
+            depth=cfg.stage2_clf_params.get("depth", 8),
+            learning_rate=cfg.stage2_clf_params.get("learning_rate", 0.05),
+            loss_function="MultiClass",
+            random_state=cfg.random_state,
+            thread_count=-1,
+            verbose=False,
+        )
+
+    elif cfg.stage2_clf_name == "extratrees":
+        # Convertir claves string a índices enteros
+        class_weight_dict = {i: w for i, (_, w) in enumerate(class_weights.items())}
+        return ExtraTreesClassifier(
+            n_estimators=cfg.stage2_clf_params.get("n_estimators", 1000),
+            max_depth=cfg.stage2_clf_params.get("max_depth", None),
+            class_weight=class_weight_dict,
+            n_jobs=-1,
+            random_state=cfg.random_state,
+        )
+
+    else:
+        raise ValueError(f"Nombre de clasificador stage2 desconocido: {cfg.stage2_clf_name}")
+
+
+class HierarchicalClassifier(BaseEstimator):
+    """
+    Clasificador jerárquico de dos etapas.
+    Etapa 1: Detección binaria de cáncer (cancer vs nonMalignant)
+    Etapa 2: Clasificación multiclase de tipo de cáncer (18 tipos)
+
+    Compatible con la API de scikit-learn.
+    """
+
+    def __init__(
+        self,
+        stage1_pipeline: Pipeline,
+        stage2_pipeline: Pipeline,
+        stage1_threshold: Optional[float] = None,
+        nonmalignant_label: str = "nonMalignant",
+    ):
+        self.stage1_pipeline = stage1_pipeline
+        self.stage2_pipeline = stage2_pipeline
+        self.stage1_threshold = stage1_threshold
+        self.nonmalignant_label = nonmalignant_label
+
+    def fit(self, X, y, **fit_params):
+        """Entrena ambas etapas."""
+        # Etapa 1: Binario (cancer vs nonMalignant)
+        y_binary = (y != self.nonmalignant_label).astype(int)
+
+        stage1_fit_params = {
+            k.replace("stage1__", ""): v
+            for k, v in fit_params.items()
+            if k.startswith("stage1__")
+        }
+        self.stage1_pipeline.fit(X, y_binary, **stage1_fit_params)
+
+        # Etapa 2: Multiclase (solo tipos de cáncer)
+        cancer_mask = y != self.nonmalignant_label
+        X_cancer = X[cancer_mask]
+        y_cancer = y[cancer_mask]
+
+        if len(X_cancer) == 0:
+            raise ValueError("No hay muestras de cáncer para entrenar la etapa 2")
+
+        stage2_fit_params = {
+            k.replace("stage2__", ""): (v[cancer_mask] if hasattr(v, "__getitem__") else v)
+            for k, v in fit_params.items()
+            if k.startswith("stage2__")
+        }
+        self.stage2_pipeline.fit(X_cancer, y_cancer, **stage2_fit_params)
+
+        self.classes_ = np.unique(y)
+        return self
+
+    def predict_proba(self, X):
+        """Predicción de probabilidades en dos etapas."""
+        # Etapa 1: [p(nonMalignant), p(cancer)]
+        stage1_proba = self.stage1_pipeline.predict_proba(X)
+        p_cancer = stage1_proba[:, 1]
+
+        # Etapa 2: probabilidades sobre tipos de cáncer
+        stage2_proba = self.stage2_pipeline.predict_proba(X)
+        stage2_classes = self.stage2_pipeline.classes_
+
+        # Construir matriz de probabilidades final
+        n_samples = X.shape[0]
+        n_classes = len(self.classes_)
+        final_proba = np.zeros((n_samples, n_classes))
+
+        # Probabilidad de nonMalignant desde etapa 1
+        nonmal_idx = np.where(self.classes_ == self.nonmalignant_label)[0][0]
+        final_proba[:, nonmal_idx] = stage1_proba[:, 0]
+
+        # Distribuir probabilidad de cáncer entre tipos
+        for i, cancer_type in enumerate(stage2_classes):
+            cancer_type_idx = np.where(self.classes_ == cancer_type)[0][0]
+            final_proba[:, cancer_type_idx] = p_cancer * stage2_proba[:, i]
+
+        # Normalizar (estabilidad numérica)
+        row_sums = final_proba.sum(axis=1, keepdims=True)
+        final_proba = final_proba / (row_sums + 1e-10)
+
+        return final_proba
+
+    def predict(self, X):
+        """Predicción en dos etapas con umbral opcional."""
+        if self.stage1_threshold is None:
+            proba = self.predict_proba(X)
+            return self.classes_[np.argmax(proba, axis=1)]
+
+        # Predicción basada en umbral
+        stage1_proba = self.stage1_pipeline.predict_proba(X)
+        p_cancer = stage1_proba[:, 1]
+
+        predictions = np.full(len(X), self.nonmalignant_label, dtype=object)
+
+        cancer_mask = p_cancer >= self.stage1_threshold
+        if cancer_mask.any():
+            X_cancer = X[cancer_mask]
+            stage2_pred = self.stage2_pipeline.predict(X_cancer)
+            predictions[cancer_mask] = stage2_pred
+
+        return predictions
+
+    def set_stage1_threshold(self, threshold: float):
+        """Actualiza el umbral de detección binaria de cáncer."""
+        self.stage1_threshold = threshold

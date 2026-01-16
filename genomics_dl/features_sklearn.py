@@ -110,6 +110,53 @@ class Log1pTransformer(BaseEstimator, TransformerMixin):
         return input_features
 
 
+class VarianceThresholdFilter(BaseEstimator, TransformerMixin):
+    """
+    Removes features with variance below a threshold.
+    Prevents NaN in StandardScaler when features become constant after transformations.
+
+    Parameters
+    ----------
+    threshold : float, default=1e-6
+        Features with variance below this value are removed.
+    """
+
+    def __init__(self, threshold: float = 1e-6):
+        self.threshold = threshold
+
+    def fit(self, X, y=None):
+        X_df = _to_df(X)
+        var = X_df.var(axis=0)
+        self.kept_features_ = var[var >= self.threshold].index.tolist()
+
+        if not self.kept_features_:
+            raise ValueError(
+                f"VarianceThresholdFilter: All features have variance < {self.threshold}. "
+                "Consider lowering the threshold."
+            )
+
+        removed_count = len(X_df.columns) - len(self.kept_features_)
+        if removed_count > 0:
+            # Features with insufficient variance were removed
+            pass
+
+        return self
+
+    def transform(self, X):
+        check_is_fitted(self, "kept_features_")
+        X_df = _to_df(X)
+        missing = [f for f in self.kept_features_ if f not in X_df.columns]
+        if missing:
+            raise ValueError(
+                f"VarianceThresholdFilter: Missing features in X: {missing[:10]} ..."
+            )
+        return X_df.loc[:, self.kept_features_]
+
+    def get_feature_names_out(self, input_features=None):
+        check_is_fitted(self, "kept_features_")
+        return np.array(self.kept_features_, dtype=object)
+
+
 class PandasStandardScaler(BaseEstimator, TransformerMixin):
     """StandardScaler que devuelve DataFrame conservando index/columns."""
 
