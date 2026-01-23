@@ -543,3 +543,153 @@ Con esto, la Iteración 3 deja establecido el **marco de entrenamiento binario**
 - Extender la misma metodología (pipeline + MLflow + selección de umbral) a problemas de **clasificación multiclase** (tipos de cáncer).
 
 ---
+
+
+## Iteración 4: Clasificación multiclase y enfoque jerárquico (rama `feat/multiclas_model`)
+
+### 1. Objetivo de la iteración
+
+En esta iteración se ha iniciado la extensión **multiclase** a partir del pipeline binario ya estabilizado en la Iteración 3, manteniendo los mismos principios:
+
+- Pipeline reproducible tipo scikit-learn, evitando fugas de información.
+- Tracking de experimentos con MLflow.
+- Priorización clínica: primero detectar cáncer (minimizar falsos negativos) y, en segundo lugar, intentar distinguir el **tipo de cáncer**.
+
+Se fijó como requisito que todas las enfermedades **no malignas** se agrupen en una única etiqueta (`nonMalignant`), diferenciando subtipos solo dentro de los casos malignos.
+
+
+### 2. Adaptación a multiclase (baseline)
+
+Se implementó un pipeline multiclase análogo al binario:
+
+- Misma filosofía de separación de columnas (**genes vs metadatos**) y control explícito de `feature_cols`.
+- Misma estructura de entrenamiento con **validación cruzada + evaluación en test**.
+
+Se añadieron métricas multiclase globales:
+
+- Accuracy, balanced accuracy.
+- F1 macro y F1 weighted.
+- Log loss.
+
+Además, se incorporó un bloque de métricas “clínicas” derivadas para el problema **binario implícito** (cáncer vs no), incluyendo:
+
+- `cancer_fn`, `cancer_fnr`, `cancer_recall` / sensibilidad, especificidad, precision.
+- AUCs específicas: `cancer_roc_auc`, `cancer_pr_auc`.
+
+Se discutió la interpretación de las métricas multiclase en contexto clínico:
+
+- Evaluar la **detección de cáncer** (capa binaria).
+- Evaluar la calidad por **subtipo de cáncer**, sabiendo que una métrica global puede ocultar fallos graves en clases minoritarias.
+
+
+### 3. Comparación de versiones por métricas (modelo anterior vs nuevo)
+
+Se compararon los `metrics.json` de dos versiones del modelo multiclase:
+
+- El modelo anterior mostraba:
+  - Mejor rendimiento global multiclase (macro-F1, balanced accuracy).
+  - Mejor separación “cáncer vs no” (AUC/PR-AUC más altas).
+- La nueva versión presentaba:
+  - Caída marcada en métricas multiclase (macro-F1 y balanced accuracy).
+  - Degradación en las métricas “cáncer vs no” (AUCs y recall algo peores).
+  - Comportamiento de tipo “colapso” de predicciones hacia ciertas clases (varias clases con recall 0).
+
+Esta comparación sirvió para detectar que algunos cambios introducidos en el pipeline (modelos/configuraciones concretas) estaban deteriorando de forma significativa el comportamiento multiclase.
+
+
+### 4. Problemas de entrenamiento y estabilidad numérica
+
+Durante el barrido de configuraciones multiclase aparecieron:
+
+- Warnings y errores de **estabilidad numérica**, especialmente en configuraciones con `sgd_logloss`.
+- Excepciones del tipo `ValueError("Input contains NaN")` y avisos relativos a la normalización de probabilidades.
+
+Se comprobó que estos fallos no eran casos aislados del grid, sino problemas **sistémicos** en determinadas combinaciones. A partir de ahí se plantearon medidas de robustez:
+
+- Ajustar parámetros del estimador para mejorar estabilidad (por ejemplo, early stopping, averaging, etc.).
+- Incorporar un control más explícito de NaNs y fallos por combinación para que el sweep no colapse por completo y se puedan registrar los errores de cada modelo de forma controlada.
+
+### 5. Optimización del flujo del sweep
+
+Para mejorar la usabilidad y la resiliencia del barrido de modelos multiclase se añadieron varias mejoras:
+
+- Uso de **tqdm** para mostrar el progreso del sweep y una estimación de tiempo restante (ETA).
+- Manejo de excepciones:
+  - Las combinaciones que fallan registran el error.
+  - El resto del barrido continúa, evitando que un fallo puntual detenga toda la iteración.
+
+Además, se observó que una paralelización demasiado agresiva podía:
+
+- Desestabilizar el kernel del contenedor (por consumo de recursos).
+- Dejar procesos “huérfanos”.
+
+Se dejó como recomendación limitar el paralelismo y ser conservador en el uso de recursos cuando se ejecutan grids grandes en el entorno de desarrollo.
+
+
+### 6. Gestión de artefactos grandes y Git LFS
+
+Al intentar hacer push de la rama se bloqueó el envío por los límites de GitHub (>100 MB) debido a artefactos grandes, como:
+
+- `models/.../model.pkl` del modelo multiclase (por encima del límite).
+- Otros ficheros binarios/pesados (por ejemplo, `.parquet`, `.RData`).
+
+Se resolvió:
+
+1. Configurando **Git LFS** para trackear artefactos pesados:
+   - Patrones como `models/**/*.pkl`, `data/**/*.parquet`, `data/**/*.RData` en `.gitattributes`.
+2. Reescribiendo el historial de la rama con:
+   - `git lfs migrate import`
+   para evitar que blobs grandes quedasen en commits antiguos.
+3. Haciendo push de la rama con `--force-with-lease` tras la migración.
+4. Reajustando el `main` local para alinearlo de nuevo con `origin/main` después de la operación.
+
+Una vez definidos los patrones en `.gitattributes` los nuevos ficheros que coincidan con esos patrones se subirán automáticamente vía LFS. Solo es necesario añadir reglas nuevas si aparece un tipo de fichero grande distinto.
+
+
+### 7. Evolución hacia un enfoque jerárquico en dos etapas
+
+Para alinear mejor la tarea con el objetivo clínico, se introdujo un enfoque **jerárquico**:
+
+1. **Etapa 1 (binaria)**
+   - Detectar cáncer vs nonMalignant.
+   - Objetivo: alto recall/sensibilidad (minimizar falsos negativos).
+
+2. **Etapa 2 (multiclase)**
+   - Clasificar el tipo de cáncer **solo en las muestras malignas**.
+   - Evitar que la clase nonMalignant interfiera en el reparto de probabilidad entre los distintos tipos de cáncer.
+
+Se añadieron utilidades con integración en MLflow para este flujo jerárquico:
+
+- Construcción del pipeline jerárquico (dos etapas encadenadas).
+- Cálculo de métricas por etapa y métricas end-to-end.
+- Generación de matrices de confusión.
+- Guardado del bundle final jerárquico.
+- Orquestación completa del entrenamiento jerárquico con logging de:
+  - Parámetros.
+  - Métricas.
+  - Artefactos.
+  - Modelo final.
+
+
+### 8. Cambios recientes consolidados
+
+Durante la iteración se consolidaron además los siguientes ajustes:
+
+- **Pipeline multiclase**:
+  - Se añadió un `VarianceThresholdFilter` dentro del pipeline, aplicado después de `log1p` y antes del escalado, para reducir problemas numéricos eliminando features constantes o casi constantes.
+
+- **Notebook 4.0 (baseline multiclase)**:
+  - Se sustituyó `sgd_logloss` por **RandomForest** en el grid de modelos.
+  - Se mantuvo un conjunto comparable de clasificadores: logistic regression, RandomForest, ExtraTrees.
+
+- **Notebook 5.0 (baseline jerárquico)**:
+  - Se creó `notebooks/5.0-ssic-hierarchical-baselines.ipynb` con un grid jerárquico de 12 combinaciones, variando:
+    - Clasificador de la etapa 1 (XGBoost / LightGBM ).
+    - Clasificador de la etapa 2 (XGBoost / LightGBM ).
+    - Estrategia de pesos de clase (balanced / sqrt / log).
+    - Recall mínimo objetivo (0.90).
+  - Se definió un ranking de modelos priorizando:
+    - FN → FNR → F1-macro (criterios clínicos),
+    además de un entrenamiento final del mejor modelo con guardado completo.
+
+---

@@ -10,20 +10,14 @@ PYTHON_INTERPRETER = python
 # COMMANDS                                                                      #
 #################################################################################
 
-## Sync Python dependencies (uv.lock)
+
+## Install Python dependencies
 .PHONY: requirements
 requirements:
 	uv sync
+	
 
-## Sync deps exactly as locked (CI-like)
-.PHONY: requirements_frozen
-requirements_frozen:
-	uv sync --frozen
 
-## Pull LFS files (data/models tracked with LFS)
-.PHONY: lfs_pull
-lfs_pull:
-	git lfs pull
 
 ## Delete all compiled Python files
 .PHONY: clean
@@ -31,49 +25,42 @@ clean:
 	find . -type f -name "*.py[co]" -delete
 	find . -type d -name "__pycache__" -delete
 
+
 ## Lint using ruff (use `make format` to do formatting)
 .PHONY: lint
 lint:
-	uv run ruff format --check .
-	uv run ruff check .
+	ruff format --check
+	ruff check
 
 ## Format source code with ruff
 .PHONY: format
 format:
-	uv run ruff check --fix .
-	uv run ruff format .
+	ruff check --fix
+	ruff format
+
+
 
 ## Run tests
 .PHONY: test
 test:
-	uv run pytest -q
-
-## Run pre-commit hooks on all files (CI-like)
-.PHONY: precommit
-precommit:
-	uv run pre-commit run --all-files
-
-## Convenience target: run the usual local gating
-.PHONY: check
-check: lint test
-
-# Añadir target
-.PHONY: train-binary
-train-binary:
-	python -m genomics_dl.models.train_binary
+	python -m pytest tests
 
 
-## Set up Python interpreter environment (optional; uv sync usually suffices)
+## Set up Python interpreter environment
 .PHONY: create_environment
 create_environment:
 	uv venv --python $(PYTHON_VERSION)
 	@echo ">>> New uv virtual environment created. Activate with:"
 	@echo ">>> Windows: .\\\\.venv\\\\Scripts\\\\activate"
 	@echo ">>> Unix/macOS: source ./.venv/bin/activate"
+	
+
+
 
 #################################################################################
 # PROJECT RULES                                                                 #
 #################################################################################
+
 
 
 #################################################################################
