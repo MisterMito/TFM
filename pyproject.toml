@@ -40,6 +40,7 @@ dependencies = [
     "scikit-learn",
     "seaborn>=0.13.2",
     "tqdm>=4.67.1",
+    "numba>=0.59.0",
     "umap-learn>=0.5.9.post2",
     "xgboost>=2.0.0",
 ]
