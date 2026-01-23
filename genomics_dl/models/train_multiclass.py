@@ -1,22 +1,25 @@
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass, field
 import json
+from pathlib import Path
 import shutil
 import tempfile
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from typing import Any, Optional, Iterable
+from typing import Any, Optional
 
 import joblib
 import matplotlib.pyplot as plt
+import mlflow
+from mlflow.models.signature import infer_signature
+import mlflow.sklearn
 import numpy as np
 import pandas as pd
-import yaml
-from sklearn.base import BaseEstimator
+from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.metrics import (
+    average_precision_score,
     balanced_accuracy_score,
     classification_report,
     confusion_matrix,
@@ -26,15 +29,12 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
     roc_auc_score,
-    average_precision_score,
 )
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import LabelEncoder
 from sklearn.svm import LinearSVC
-
-import mlflow
-import mlflow.sklearn
-from mlflow.models.signature import infer_signature
+import yaml
 
 from genomics_dl.features_sklearn import (
     FeatureColumnSelector,
@@ -231,6 +231,7 @@ class HierarchicalTrainConfig:
 
     # Validación cruzada
     cv_splits: int = 8
+    skip_cv_for_sweep: bool = False  # Si True, usa threshold fijo sin CV (más rápido)
     random_state: int = 42
 
     # MLflow
@@ -342,10 +343,15 @@ def build_classifier(cfg: MulticlassTrainConfig, y_train: np.ndarray):
 
 
 def build_pipeline(cfg: MulticlassTrainConfig, feature_cols: list[str], y_train: np.ndarray) -> Pipeline:
+    """
+    Construye pipeline de preprocesamiento + clasificador.
+    Incluye VarianceThresholdFilter para prevenir NaN en StandardScaler.
+    """
     clf = build_classifier(cfg, y_train=y_train)
 
     selector = HighVarGeneSelector(var_quantile=cfg.var_quantile)
     log = Log1pTransformer()
+    variance_filter = VarianceThresholdFilter(threshold=1e-6)  # Previene NaN en StandardScaler
     scale = PandasStandardScaler()
     pca = PCAAuto(
         var_threshold=cfg.pca_var_threshold,
@@ -355,9 +361,21 @@ def build_pipeline(cfg: MulticlassTrainConfig, feature_cols: list[str], y_train:
 
     steps: list[tuple[str, Any]] = [("ensure_features", FeatureColumnSelector(feature_cols))]
     if cfg.selector_on_log:
-        steps.extend([("log1p", log), ("select", selector), ("scale", scale)])
+        # log1p -> selector -> variance_filter -> scale
+        steps.extend([
+            ("log1p", log),
+            ("select", selector),
+            ("variance_filter", variance_filter),
+            ("scale", scale),
+        ])
     else:
-        steps.extend([("select", selector), ("log1p", log), ("scale", scale)])
+        # selector -> log1p -> variance_filter -> scale
+        steps.extend([
+            ("select", selector),
+            ("log1p", log),
+            ("variance_filter", variance_filter),
+            ("scale", scale),
+        ])
 
     steps.append(("pca", pca if cfg.use_pca else "passthrough"))
     steps.append(("clf", clf))
@@ -959,6 +977,38 @@ def build_stage1_binary_classifier(
         raise ValueError(f"Nombre de clasificador stage1 desconocido: {cfg.stage1_clf_name}")
 
 
+class XGBClassifierWithLabelEncoder(BaseEstimator, ClassifierMixin):
+    """Wrapper de XGBClassifier que maneja etiquetas string automáticamente."""
+
+    def __init__(self, class_weights: Optional[dict] = None, **xgb_params):
+        self.class_weights = class_weights
+        self.xgb_params = xgb_params
+        self._label_encoder = LabelEncoder()
+        self._xgb = None
+
+    def fit(self, X, y, **fit_params):
+        import xgboost as xgb
+        # Codificar etiquetas string a números
+        y_encoded = self._label_encoder.fit_transform(y)
+        self.classes_ = self._label_encoder.classes_
+
+        # Calcular sample_weight si hay class_weights
+        sample_weight = None
+        if self.class_weights is not None:
+            sample_weight = np.array([self.class_weights.get(label, 1.0) for label in y])
+
+        self._xgb = xgb.XGBClassifier(**self.xgb_params)
+        self._xgb.fit(X, y_encoded, sample_weight=sample_weight, **fit_params)
+        return self
+
+    def predict(self, X):
+        y_encoded = self._xgb.predict(X)
+        return self._label_encoder.inverse_transform(y_encoded)
+
+    def predict_proba(self, X):
+        return self._xgb.predict_proba(X)
+
+
 def build_stage2_multiclass_classifier(
     cfg: HierarchicalTrainConfig,
     y_cancer: np.ndarray
@@ -972,9 +1022,9 @@ def build_stage2_multiclass_classifier(
     )
 
     if cfg.stage2_clf_name == "xgboost":
-        import xgboost as xgb
-        # XGBoost usa sample_weight en fit(), no class_weight como parámetro
-        return xgb.XGBClassifier(
+        # Usar wrapper que maneja etiquetas string y class_weights
+        return XGBClassifierWithLabelEncoder(
+            class_weights=class_weights,
             n_estimators=cfg.stage2_clf_params.get("n_estimators", 500),
             max_depth=cfg.stage2_clf_params.get("max_depth", 8),
             learning_rate=cfg.stage2_clf_params.get("learning_rate", 0.05),
@@ -1013,12 +1063,12 @@ def build_stage2_multiclass_classifier(
         )
 
     elif cfg.stage2_clf_name == "extratrees":
-        # Convertir claves string a índices enteros
-        class_weight_dict = {i: w for i, (_, w) in enumerate(class_weights.items())}
+        # class_weights ya tiene claves string (nombres de clases)
+        # sklearn ExtraTrees acepta dict con etiquetas como claves directamente
         return ExtraTreesClassifier(
             n_estimators=cfg.stage2_clf_params.get("n_estimators", 1000),
             max_depth=cfg.stage2_clf_params.get("max_depth", None),
-            class_weight=class_weight_dict,
+            class_weight=class_weights,  # Usar directamente, sin conversión
             n_jobs=-1,
             random_state=cfg.random_state,
         )
@@ -1131,3 +1181,468 @@ class HierarchicalClassifier(BaseEstimator):
     def set_stage1_threshold(self, threshold: float):
         """Actualiza el umbral de detección binaria de cáncer."""
         self.stage1_threshold = threshold
+
+
+# ============================================================================
+# FUNCIONES PARA CLASIFICACIÓN JERÁRQUICA CON INTEGRACIÓN MLFLOW
+# ============================================================================
+
+
+def build_hierarchical_pipeline(
+    cfg: HierarchicalTrainConfig,
+    feature_cols: list[str],
+    clf: Any,
+) -> Pipeline:
+    """
+    Construye pipeline de preprocesamiento para clasificación jerárquica.
+    Incluye VarianceThresholdFilter para prevenir NaN en StandardScaler.
+
+    Args:
+        cfg: Configuración jerárquica
+        feature_cols: Lista de columnas de genes
+        clf: Clasificador (etapa 1 o etapa 2)
+
+    Returns:
+        Pipeline de sklearn con preprocesamiento + clasificador
+    """
+    selector = HighVarGeneSelector(var_quantile=cfg.var_quantile)
+    log = Log1pTransformer()
+    variance_filter = VarianceThresholdFilter(threshold=cfg.variance_filter_threshold)
+    scale = PandasStandardScaler()
+    pca = PCAAuto(
+        var_threshold=cfg.pca_var_threshold,
+        max_components=cfg.max_pca_components,
+        random_state=cfg.random_state,
+    )
+
+    steps: list[tuple[str, Any]] = [("ensure_features", FeatureColumnSelector(feature_cols))]
+    if cfg.selector_on_log:
+        # log1p -> selector -> variance_filter -> scale
+        steps.extend([
+            ("log1p", log),
+            ("select", selector),
+            ("variance_filter", variance_filter),
+            ("scale", scale),
+        ])
+    else:
+        # selector -> log1p -> variance_filter -> scale
+        steps.extend([
+            ("select", selector),
+            ("log1p", log),
+            ("variance_filter", variance_filter),
+            ("scale", scale),
+        ])
+
+    steps.append(("pca", pca if cfg.use_pca else "passthrough"))
+    steps.append(("clf", clf))
+
+    return Pipeline(steps=steps)
+
+
+def compute_hierarchical_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    y_proba: np.ndarray,
+    classes: np.ndarray,
+    nonmalignant_label: str,
+    stage1_threshold: float,
+) -> dict[str, Any]:
+    """
+    Calcula métricas para clasificación jerárquica.
+    Incluye métricas por etapa y métricas globales.
+
+    Args:
+        y_true: Etiquetas verdaderas
+        y_pred: Predicciones
+        y_proba: Probabilidades predichas (n_samples, n_classes)
+        classes: Array de clases
+        nonmalignant_label: Etiqueta de no-maligno
+        stage1_threshold: Umbral usado en etapa 1
+
+    Returns:
+        Diccionario con métricas CV y test
+    """
+    # Métricas globales multiclase
+    acc = float(np.mean(y_pred == y_true))
+    bal_acc = float(balanced_accuracy_score(y_true, y_pred))
+    f1_macro = float(f1_score(y_true, y_pred, average="macro", zero_division=0))
+    f1_weighted = float(f1_score(y_true, y_pred, average="weighted", zero_division=0))
+
+    # Métricas binarias (cáncer vs nonMalignant)
+    y_true_binary = (y_true != nonmalignant_label).astype(int)
+    y_pred_binary = (y_pred != nonmalignant_label).astype(int)
+
+    # Encontrar índice de nonMalignant para calcular p(cancer)
+    idx_nonmal = int(np.where(classes == nonmalignant_label)[0][0])
+    p_cancer = 1.0 - y_proba[:, idx_nonmal]
+
+    tn, fp, fn, tp = confusion_matrix(y_true_binary, y_pred_binary, labels=[0, 1]).ravel()
+
+    cancer_recall = float(tp / (tp + fn)) if (tp + fn) > 0 else 0.0
+    cancer_precision = float(tp / (tp + fp)) if (tp + fp) > 0 else 0.0
+    cancer_specificity = float(tn / (tn + fp)) if (tn + fp) > 0 else 0.0
+    cancer_fnr = float(fn / (fn + tp)) if (fn + tp) > 0 else 0.0
+
+    # AUC si hay varianza en las etiquetas
+    try:
+        cancer_roc_auc = float(roc_auc_score(y_true_binary, p_cancer))
+        cancer_pr_auc = float(average_precision_score(y_true_binary, p_cancer))
+    except ValueError:
+        cancer_roc_auc = float("nan")
+        cancer_pr_auc = float("nan")
+
+    # Reporte por clase
+    per_class_report = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
+
+    return {
+        "accuracy": acc,
+        "balanced_accuracy": bal_acc,
+        "f1_macro": f1_macro,
+        "f1_weighted": f1_weighted,
+        "cancer_tn": int(tn),
+        "cancer_fp": int(fp),
+        "cancer_fn": int(fn),
+        "cancer_tp": int(tp),
+        "cancer_fnr": cancer_fnr,
+        "cancer_recall_sensitivity": cancer_recall,
+        "cancer_specificity": cancer_specificity,
+        "cancer_precision": cancer_precision,
+        "cancer_roc_auc": cancer_roc_auc,
+        "cancer_pr_auc": cancer_pr_auc,
+        "stage1_threshold": float(stage1_threshold),
+        "per_class_report": per_class_report,
+    }
+
+
+def plot_hierarchical_confusion(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    classes: np.ndarray,
+    title: str,
+    outpath: Path,
+) -> None:
+    """
+    Genera matriz de confusión para clasificación jerárquica.
+
+    Args:
+        y_true: Etiquetas verdaderas
+        y_pred: Predicciones
+        classes: Array de clases
+        title: Título del gráfico
+        outpath: Ruta de salida para guardar la imagen
+    """
+    cm = confusion_matrix(y_true, y_pred, labels=classes)
+    fig, ax = plt.subplots(figsize=(14, 12))
+    im = ax.imshow(cm, interpolation="nearest", cmap="Blues")
+    ax.figure.colorbar(im, ax=ax)
+    ax.set(
+        xticks=np.arange(len(classes)),
+        yticks=np.arange(len(classes)),
+        xticklabels=classes,
+        yticklabels=classes,
+        ylabel="Etiqueta Real",
+        xlabel="Predicción",
+        title=title,
+    )
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+
+    # Añadir valores en cada celda
+    thresh = cm.max() / 2.0
+    for i in range(len(classes)):
+        for j in range(len(classes)):
+            ax.text(
+                j, i, format(cm[i, j], "d"),
+                ha="center", va="center",
+                color="white" if cm[i, j] > thresh else "black",
+                fontsize=8,
+            )
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_hierarchical_bundle(
+    model: HierarchicalClassifier,
+    cfg: HierarchicalTrainConfig,
+    metrics: dict[str, Any],
+    params: dict[str, Any],
+    feature_cols: list[str],
+    output_dir: Path,
+    input_example: pd.DataFrame,
+) -> Path:
+    """
+    Guarda el modelo jerárquico en formato bundle.
+    Estructura similar a save_model_bundle pero para dos etapas.
+
+    Args:
+        model: Clasificador jerárquico entrenado
+        cfg: Configuración jerárquica
+        metrics: Diccionario de métricas
+        params: Diccionario de parámetros
+        feature_cols: Lista de columnas de genes
+        output_dir: Directorio base de salida
+        input_example: Ejemplo de entrada para signature
+
+    Returns:
+        Path del directorio del bundle guardado
+    """
+    model_dir = output_dir / cfg.model_name / cfg.model_version
+    _ensure_dir(model_dir)
+
+    # Modelo completo (pickle)
+    joblib.dump(model, model_dir / "model.pkl")
+
+    # Pipelines individuales (para debugging)
+    joblib.dump(model.stage1_pipeline, model_dir / "stage1_pipeline.pkl")
+    joblib.dump(model.stage2_pipeline, model_dir / "stage2_pipeline.pkl")
+
+    # Métricas
+    with (model_dir / "metrics.json").open("w", encoding="utf-8") as f:
+        json.dump(_to_serializable(metrics), f, indent=2)
+
+    # Parámetros
+    with (model_dir / "params.yaml").open("w", encoding="utf-8") as f:
+        yaml.safe_dump(_to_serializable(params), f, sort_keys=False)
+
+    # Signature (metadata)
+    sig = {
+        "input_columns": list(input_example.columns),
+        "output_type": "hierarchical_multiclass",
+        "classes": list(model.classes_) if hasattr(model, "classes_") else [],
+        "nonmalignant_label": cfg.nonmalignant_label,
+        "decision_rule": "stage1_gating_then_stage2_argmax",
+        "stage1_clf": cfg.stage1_clf_name,
+        "stage2_clf": cfg.stage2_clf_name,
+        "stage1_threshold": model.stage1_threshold,
+    }
+    with (model_dir / "signature.json").open("w", encoding="utf-8") as f:
+        json.dump(_to_serializable(sig), f, indent=2)
+
+    # Input example
+    input_example.to_json(model_dir / "input_example.json", orient="records", indent=2)
+
+    # Requerimientos (para reproducibilidad)
+    requirements = [
+        "scikit-learn>=1.0.0",
+        "numpy>=1.20.0",
+        "pandas>=1.3.0",
+        "xgboost>=2.0.0",
+        "lightgbm>=4.1.0",
+        "catboost>=1.2.0",
+    ]
+    with (model_dir / "requirements.txt").open("w", encoding="utf-8") as f:
+        f.write("\n".join(requirements))
+
+    # MLflow local model format
+    _persist_mlflow_local_model(model, model_dir, input_example)
+
+    return model_dir
+
+
+def run_hierarchical_training(
+    cfg: HierarchicalTrainConfig,
+    feature_cols: list[str],
+) -> dict[str, Any]:
+    """
+    Entrena y evalúa clasificador jerárquico de dos etapas.
+    Integración completa con MLflow (igual que run_training).
+
+    Args:
+        cfg: Configuración jerárquica
+        feature_cols: Lista de columnas de genes
+
+    Returns:
+        Diccionario con métricas, run_id de MLflow, y ruta del bundle
+    """
+    # Configurar MLflow
+    if cfg.tracking_uri:
+        mlflow.set_tracking_uri(cfg.tracking_uri)
+    mlflow.set_experiment(cfg.experiment_name)
+
+    # Cargar datos
+    df_train = load_parquet(cfg.train_path)
+    df_test = load_parquet(cfg.test_path)
+
+    X_train, y_train = build_xy(
+        df_train,
+        feature_cols=feature_cols,
+        class_group_col=cfg.class_group_col,
+        patient_group_col=cfg.patient_group_col,
+        nonmalignant_label=cfg.nonmalignant_label,
+        malignant_label=cfg.malignant_label,
+    )
+    X_test, y_test = build_xy(
+        df_test,
+        feature_cols=feature_cols,
+        class_group_col=cfg.class_group_col,
+        patient_group_col=cfg.patient_group_col,
+        nonmalignant_label=cfg.nonmalignant_label,
+        malignant_label=cfg.malignant_label,
+    )
+
+    # Estadísticas de clases para etapa 1 (binario)
+    y_binary_train = (y_train != cfg.nonmalignant_label).astype(int)
+    n_malignant = int(y_binary_train.sum())
+    n_nonmalignant = len(y_binary_train) - n_malignant
+
+    # Máscara y etiquetas para etapa 2 (solo cáncer)
+    cancer_mask_train = y_train != cfg.nonmalignant_label
+    y_cancer_train = y_train[cancer_mask_train]
+
+    # Rutas de salida
+    repo_root = find_repo_root()
+    models_root = resolve_under_repo(cfg.output_models_dir, repo_root)
+    figs_root = resolve_under_repo(cfg.output_figures_dir, repo_root)
+
+    run_name = f"{cfg.model_name}_{cfg.model_version}"
+
+    with mlflow.start_run(run_name=run_name) as run:
+        # ===== LOG PARAMS =====
+        params = asdict(cfg)
+        params.pop("train_path", None)
+        params.pop("test_path", None)
+        mlflow.log_params({k: _to_serializable(v) for k, v in params.items()})
+
+        # ===== CONSTRUIR CLASIFICADORES =====
+        stage1_clf = build_stage1_binary_classifier(cfg, n_malignant, n_nonmalignant)
+        stage1_pipeline = build_hierarchical_pipeline(cfg, feature_cols, stage1_clf)
+
+        stage2_clf = build_stage2_multiclass_classifier(cfg, y_cancer_train)
+        stage2_pipeline = build_hierarchical_pipeline(cfg, feature_cols, stage2_clf)
+
+        # ===== SELECCIÓN DE THRESHOLD ETAPA 1 =====
+        if cfg.skip_cv_for_sweep:
+            # Modo rápido: usar threshold por defecto sin CV (para sweeps exploratorios)
+            chosen_thr = 0.5
+        else:
+            # Modo completo: cross-validation para optimizar threshold
+            cv = StratifiedKFold(n_splits=cfg.cv_splits, shuffle=True, random_state=cfg.random_state)
+            oof_stage1_proba = cross_val_predict(
+                stage1_pipeline, X_train, y_binary_train,
+                cv=cv, method="predict_proba", n_jobs=4
+            )
+            p_cancer_oof = oof_stage1_proba[:, 1]
+            chosen_thr = choose_threshold_for_min_recall(
+                y_true=y_binary_train,
+                y_score=p_cancer_oof,
+                min_recall=cfg.stage1_min_recall,
+                objective=cfg.stage1_threshold_objective,
+            )
+
+        # ===== ENTRENAR MODELOS FINALES =====
+        stage1_pipeline.fit(X_train, y_binary_train)
+        stage2_pipeline.fit(X_train[cancer_mask_train], y_cancer_train)
+
+        # Crear modelo jerárquico
+        hierarchical_model = HierarchicalClassifier(
+            stage1_pipeline=stage1_pipeline,
+            stage2_pipeline=stage2_pipeline,
+            stage1_threshold=chosen_thr,
+            nonmalignant_label=cfg.nonmalignant_label,
+        )
+        hierarchical_model.classes_ = np.unique(y_train)
+
+        # ===== PREDICCIONES TRAIN Y TEST =====
+        # Train (usando modelo entrenado con todo el train)
+        train_proba = hierarchical_model.predict_proba(X_train)
+        train_pred = hierarchical_model.predict(X_train)
+
+        # Test
+        test_proba = hierarchical_model.predict_proba(X_test)
+        test_pred = hierarchical_model.predict(X_test)
+
+        # ===== CALCULAR MÉTRICAS =====
+        train_metrics = compute_hierarchical_metrics(
+            y_true=y_train,
+            y_pred=train_pred,
+            y_proba=train_proba,
+            classes=hierarchical_model.classes_,
+            nonmalignant_label=cfg.nonmalignant_label,
+            stage1_threshold=chosen_thr,
+        )
+
+        test_metrics = compute_hierarchical_metrics(
+            y_true=y_test,
+            y_pred=test_pred,
+            y_proba=test_proba,
+            classes=hierarchical_model.classes_,
+            nonmalignant_label=cfg.nonmalignant_label,
+            stage1_threshold=chosen_thr,
+        )
+
+        # ===== LOG MÉTRICAS A MLFLOW =====
+        def _flat_metrics(prefix: str, d: dict[str, Any]) -> dict[str, float]:
+            out: dict[str, float] = {}
+            for k, v in d.items():
+                if k == "per_class_report":
+                    continue
+                if isinstance(v, (int, float, np.integer, np.floating)):
+                    if np.isfinite(float(v)):
+                        out[f"{prefix}{k}"] = float(v)
+            return out
+
+        mlflow.log_metrics(_flat_metrics("train_", train_metrics))
+        mlflow.log_metrics(_flat_metrics("test_", test_metrics))
+        mlflow.log_metric("chosen_cancer_threshold", float(chosen_thr))
+
+        # ===== PLOTS =====
+        out_bundle_dir: Optional[Path] = None
+
+        if cfg.save_plots:
+            _ensure_dir(figs_root)
+
+            # Matriz de confusión
+            cm_path = figs_root / f"{cfg.model_name}_{cfg.model_version}_cm.png"
+            plot_hierarchical_confusion(
+                y_true=y_test,
+                y_pred=test_pred,
+                classes=hierarchical_model.classes_,
+                title=f"Matriz de Confusión - {cfg.model_name} {cfg.model_version}",
+                outpath=cm_path,
+            )
+
+            # PR curve (cáncer vs nonMalignant)
+            pr_path = figs_root / f"{cfg.model_name}_{cfg.model_version}_pr_cancer.png"
+            plot_pr_cancer(
+                y_true=y_test,
+                proba=test_proba,
+                classes=hierarchical_model.classes_,
+                nonmalignant_label=cfg.nonmalignant_label,
+                outpath=pr_path,
+            )
+
+            if cfg.mlflow_log_artifacts:
+                mlflow.log_artifact(str(cm_path))
+                mlflow.log_artifact(str(pr_path))
+
+        # ===== GUARDAR BUNDLE =====
+        if cfg.save_local_bundle:
+            out_bundle_dir = save_hierarchical_bundle(
+                model=hierarchical_model,
+                cfg=cfg,
+                metrics={"train": train_metrics, "test": test_metrics, "threshold": chosen_thr},
+                params=asdict(cfg),
+                feature_cols=feature_cols,
+                output_dir=models_root,
+                input_example=X_train.iloc[:5].copy(),
+            )
+
+        # ===== LOG MODELO A MLFLOW =====
+        if cfg.mlflow_log_model:
+            example_X = X_train.iloc[:5].copy()
+            signature = infer_signature(example_X, hierarchical_model.predict(example_X))
+            mlflow.sklearn.log_model(
+                sk_model=hierarchical_model,
+                artifact_path="model",
+                signature=signature,
+                input_example=example_X,
+            )
+
+        return {
+            "mlflow_run_id": run.info.run_id,
+            "train_metrics": train_metrics,
+            "test_metrics": test_metrics,
+            "chosen_cancer_threshold": chosen_thr,
+            "bundle_dir": str(out_bundle_dir) if out_bundle_dir else None,
+            "classes": list(hierarchical_model.classes_),
+        }
