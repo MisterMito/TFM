@@ -589,3 +589,118 @@ def plot_umap(
 
     plt.tight_layout()
     plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Unsupervised cluster-label generation for nonMalignant samples
+# ---------------------------------------------------------------------------
+
+
+def generate_nonmalignant_clusters(
+    X_nm: pd.DataFrame,
+    pca_variance: float = 0.90,
+    n_clusters: int = 2,
+    random_state: int = 42,
+) -> Tuple[np.ndarray, object, object]:
+    """
+    Ejecuta el pipeline completo de clustering sobre muestras nonMalignant:
+      log1p → StandardScaler → PCA(pca_variance) → KMeans(n_clusters)
+
+    Parámetros
+    ----------
+    X_nm : DataFrame
+        Matriz de expresión (muestras × genes) de muestras nonMalignant.
+    pca_variance : float
+        Fracción de varianza explicada para auto-seleccionar componentes PCA.
+    n_clusters : int
+        Número de clusters para KMeans.
+    random_state : int
+        Semilla para reproducibilidad.
+
+    Devuelve
+    --------
+    labels : ndarray de shape (n_samples,)
+        Etiquetas de cluster (0, 1, ..., n_clusters-1).
+    scaler : StandardScaler ajustado.
+    pca : PCA ajustado.
+    """
+    from sklearn.cluster import KMeans
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    X_log = np.log1p(X_nm.values if isinstance(X_nm, pd.DataFrame) else X_nm)
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_log)
+
+    pca = PCA(n_components=pca_variance, random_state=random_state)
+    X_pca = pca.fit_transform(X_scaled)
+
+    km = KMeans(n_clusters=n_clusters, random_state=random_state, n_init="auto")
+    labels = km.fit_predict(X_pca)
+
+    return labels, scaler, pca
+
+
+def align_cluster_labels(
+    labels_train: np.ndarray,
+    labels_test: np.ndarray,
+    meta_train: pd.DataFrame,
+    meta_test: pd.DataFrame,
+    reference_group: str = "Asymptomatic controls",
+    patient_group_col: str = "Patient_group",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Alinea las etiquetas de cluster entre train y test usando una heurística:
+    el cluster con mayor proporción de ``reference_group`` se asigna como
+    cluster 0 en ambos conjuntos.
+
+    Si la asignación ya coincide, no se modifica nada. Si difiere, se
+    intercambian las etiquetas del conjunto que tenga la asignación invertida.
+
+    Parámetros
+    ----------
+    labels_train, labels_test : ndarray
+        Etiquetas de cluster (e.g. 0/1) para train y test respectivamente.
+    meta_train, meta_test : DataFrame
+        Metadatos con columna ``patient_group_col``.
+    reference_group : str
+        Grupo de referencia para la alineación (por defecto "Asymptomatic controls").
+    patient_group_col : str
+        Nombre de la columna con el grupo del paciente.
+
+    Devuelve
+    --------
+    (labels_train_aligned, labels_test_aligned) : tupla de ndarrays.
+    """
+
+    def _reference_cluster(labels, meta):
+        """Devuelve el cluster con más muestras de reference_group."""
+        pg = meta[patient_group_col].values
+        counts = {}
+        for cl in np.unique(labels):
+            mask = labels == cl
+            counts[cl] = np.sum(pg[mask] == reference_group)
+        return max(counts, key=counts.get)
+
+    ref_train = _reference_cluster(labels_train, meta_train)
+    ref_test = _reference_cluster(labels_test, meta_test)
+
+    labels_train_aligned = labels_train.copy()
+    labels_test_aligned = labels_test.copy()
+
+    # Normalizar train: el cluster de referencia debe ser 0
+    if ref_train != 0:
+        labels_train_aligned = np.where(
+            labels_train == 0, ref_train,
+            np.where(labels_train == ref_train, 0, labels_train),
+        )
+
+    # Normalizar test: el cluster de referencia debe ser 0
+    if ref_test != 0:
+        labels_test_aligned = np.where(
+            labels_test == 0, ref_test,
+            np.where(labels_test == ref_test, 0, labels_test),
+        )
+
+    return labels_train_aligned, labels_test_aligned
