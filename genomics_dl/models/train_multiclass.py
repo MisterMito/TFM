@@ -139,6 +139,79 @@ def build_xy(
     return X, y
 
 
+# ---------------------------------------------------------------------------
+# Helpers para soporte de nonMalignant subdividido (clusters)
+# ---------------------------------------------------------------------------
+
+
+def _is_nonmalignant(label: str, nonmalignant_label: str = "nonMalignant") -> bool:
+    """Devuelve True si *label* es la clase nonMalignant o un subtipo de cluster."""
+    s = str(label)
+    return s == nonmalignant_label or s.startswith(nonmalignant_label + "_")
+
+
+def _is_nonmalignant_mask(y, nonmalignant_label: str = "nonMalignant") -> np.ndarray:
+    """Versión vectorizada de ``_is_nonmalignant``."""
+    y_str = pd.Series(y).astype(str)
+    return (
+        (y_str == nonmalignant_label) | y_str.str.startswith(nonmalignant_label + "_")
+    ).to_numpy()
+
+
+def build_y_multiclass_with_clusters(
+    df: pd.DataFrame,
+    class_group_col: str,
+    patient_group_col: str,
+    cluster_col: str = "nm_cluster",
+    nonmalignant_label: str = "nonMalignant",
+    malignant_label: str = "Malignant",
+) -> np.ndarray:
+    """
+    Construye etiquetas multiclass con subtipos de nonMalignant:
+      - Class_group == Malignant    → Patient_group (tipo de cáncer)
+      - Class_group == nonMalignant → nonMalignant_{cluster}
+    """
+    y_base = build_y_multiclass(
+        df,
+        class_group_col=class_group_col,
+        patient_group_col=patient_group_col,
+        nonmalignant_label=nonmalignant_label,
+        malignant_label=malignant_label,
+    )
+
+    cluster = df[cluster_col]
+    nm_mask = y_base == str(nonmalignant_label)
+
+    y_out = y_base.copy()
+    for idx in np.where(nm_mask)[0]:
+        cl = cluster.iloc[idx]
+        if pd.notna(cl):
+            y_out[idx] = f"{nonmalignant_label}_{int(cl)}"
+    return y_out
+
+
+def build_xy_with_clusters(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    cluster_col: str = "nm_cluster",
+    class_group_col: str = "Class_group",
+    patient_group_col: str = "Patient_group",
+    nonmalignant_label: str = "nonMalignant",
+    malignant_label: str = "Malignant",
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Equivalente a ``build_xy`` pero usa ``build_y_multiclass_with_clusters``."""
+    X = df.loc[:, feature_cols].copy()
+    y = build_y_multiclass_with_clusters(
+        df,
+        class_group_col=class_group_col,
+        patient_group_col=patient_group_col,
+        cluster_col=cluster_col,
+        nonmalignant_label=nonmalignant_label,
+        malignant_label=malignant_label,
+    )
+    return X, y
+
+
 # Config + Pipelines
 @dataclass(frozen=True)
 class MulticlassTrainConfig:
@@ -187,6 +260,9 @@ class MulticlassTrainConfig:
     output_figures_dir: str = "reports/figures/multiclass"
 
     random_state: int = 42
+
+    # Clusters no supervisados (None = comportamiento original sin clusters)
+    cluster_col: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -246,6 +322,9 @@ class HierarchicalTrainConfig:
     output_models_dir: str = "models"
     output_figures_dir: str = "reports/figures/hierarchical"
 
+    # Clusters no supervisados (None = comportamiento original sin clusters)
+    cluster_col: Optional[str] = None
+
 
 def _build_class_weight(cfg: MulticlassTrainConfig, y_train: np.ndarray) -> Optional[dict[str, float]]:
     """
@@ -279,8 +358,8 @@ def _build_sample_weight(cfg: MulticlassTrainConfig, y: np.ndarray) -> Optional[
     """
     if str(cfg.weighting_strategy).lower() != "sample_weight":
         return None
-    y_str = pd.Series(y).astype(str).to_numpy()
-    w = np.where(y_str == str(cfg.nonmalignant_label), 1.0, float(cfg.malignant_weight)).astype(float)
+    nm_mask = _is_nonmalignant_mask(y, cfg.nonmalignant_label)
+    w = np.where(nm_mask, 1.0, float(cfg.malignant_weight)).astype(float)
     return w
 
 def build_classifier(cfg: MulticlassTrainConfig, y_train: np.ndarray):
@@ -452,18 +531,26 @@ def _predict_with_cancer_gating(
     if cancer_threshold is None:
         return classes[np.argmax(proba, axis=1)]
 
-    if nonmalignant_label not in classes:
-        # fallback
+    nonmal_idx = np.array(
+        [i for i, c in enumerate(classes) if _is_nonmalignant(c, nonmalignant_label)],
+        dtype=int,
+    )
+    if len(nonmal_idx) == 0:
         return classes[np.argmax(proba, axis=1)]
 
-    idx_non = int(np.where(classes == nonmalignant_label)[0][0])
-    p_non = proba[:, idx_non]
+    p_non = proba[:, nonmal_idx].sum(axis=1)
     p_cancer = 1.0 - p_non
 
-    malignant_idx = np.array([i for i, c in enumerate(classes) if c != nonmalignant_label], dtype=int)
+    malignant_idx = np.array(
+        [i for i, c in enumerate(classes) if not _is_nonmalignant(c, nonmalignant_label)],
+        dtype=int,
+    )
     malignant_best = malignant_idx[np.argmax(proba[:, malignant_idx], axis=1)]
 
-    y_pred = np.where(p_cancer >= float(cancer_threshold), classes[malignant_best], nonmalignant_label)
+    # Para muestras clasificadas como nonMalignant, asignar la subclase nonMalignant más probable
+    nonmal_best = nonmal_idx[np.argmax(proba[:, nonmal_idx], axis=1)]
+
+    y_pred = np.where(p_cancer >= float(cancer_threshold), classes[malignant_best], classes[nonmal_best])
     return y_pred.astype(str)
 
 
@@ -490,8 +577,8 @@ def compute_multiclass_metrics(
         ll = float("nan")
 
     # Métricas foco clínico: cáncer vs no cáncer
-    y_true_cancer = (y_true != nonmalignant_label).astype(int)
-    y_pred_cancer = (y_pred != nonmalignant_label).astype(int)
+    y_true_cancer = (~_is_nonmalignant_mask(y_true, nonmalignant_label)).astype(int)
+    y_pred_cancer = (~_is_nonmalignant_mask(y_pred, nonmalignant_label)).astype(int)
 
     tn, fp, fn, tp = confusion_matrix(y_true_cancer, y_pred_cancer, labels=[0, 1]).ravel()
     cancer_recall = float(recall_score(y_true_cancer, y_pred_cancer, zero_division=0))
@@ -500,9 +587,9 @@ def compute_multiclass_metrics(
     cancer_specificity = float(tn / (tn + fp)) if (tn + fp) else 0.0
 
     # AUC/PR-AUC en modo cáncer vs no cáncer (usando score p_cancer)
-    if nonmalignant_label in classes:
-        idx_non = int(np.where(classes == nonmalignant_label)[0][0])
-        p_cancer = 1.0 - proba[:, idx_non]
+    nonmal_idx = [i for i, c in enumerate(classes) if _is_nonmalignant(c, nonmalignant_label)]
+    if len(nonmal_idx) > 0:
+        p_cancer = 1.0 - proba[:, nonmal_idx].sum(axis=1)
         try:
             cancer_roc_auc = float(roc_auc_score(y_true_cancer, p_cancer))
         except Exception:
@@ -578,12 +665,12 @@ def plot_pr_cancer(
     nonmalignant_label: str,
     outpath: Path,
 ) -> None:
-    if nonmalignant_label not in classes:
+    nonmal_idx = [i for i, c in enumerate(classes) if _is_nonmalignant(c, nonmalignant_label)]
+    if len(nonmal_idx) == 0:
         return
 
-    idx_non = int(np.where(classes == nonmalignant_label)[0][0])
-    p_cancer = 1.0 - proba[:, idx_non]
-    y_true_cancer = (y_true.astype(str) != nonmalignant_label).astype(int)
+    p_cancer = 1.0 - proba[:, nonmal_idx].sum(axis=1)
+    y_true_cancer = (~_is_nonmalignant_mask(y_true.astype(str), nonmalignant_label)).astype(int)
 
     precision, recall, _ = precision_recall_curve(y_true_cancer, p_cancer)
 
@@ -692,21 +779,25 @@ def run_training(cfg: MulticlassTrainConfig, feature_cols: list[str]) -> dict[st
     df_train = load_parquet(cfg.train_path)
     df_test = load_parquet(cfg.test_path)
 
-    X_train, y_train = build_xy(
+    _build_xy = build_xy_with_clusters if cfg.cluster_col else build_xy
+    _extra_kw = {"cluster_col": cfg.cluster_col} if cfg.cluster_col else {}
+    X_train, y_train = _build_xy(
         df_train,
         feature_cols=feature_cols,
         class_group_col=cfg.class_group_col,
         patient_group_col=cfg.patient_group_col,
         nonmalignant_label=cfg.nonmalignant_label,
         malignant_label=cfg.malignant_label,
+        **_extra_kw,
     )
-    X_test, y_test = build_xy(
+    X_test, y_test = _build_xy(
         df_test,
         feature_cols=feature_cols,
         class_group_col=cfg.class_group_col,
         patient_group_col=cfg.patient_group_col,
         nonmalignant_label=cfg.nonmalignant_label,
         malignant_label=cfg.malignant_label,
+        **_extra_kw,
     )
 
     pipe = build_pipeline(cfg, feature_cols=feature_cols, y_train=y_train)
@@ -745,12 +836,12 @@ def run_training(cfg: MulticlassTrainConfig, feature_cols: list[str]) -> dict[st
         if cfg.min_cancer_recall_for_threshold is None:
             chosen_thr = None
         else:
-            if cfg.nonmalignant_label not in classes:
+            nonmal_idx = [i for i, c in enumerate(classes) if _is_nonmalignant(c, cfg.nonmalignant_label)]
+            if len(nonmal_idx) == 0:
                 chosen_thr = None
             else:
-                idx_non = int(np.where(classes == cfg.nonmalignant_label)[0][0])
-                p_cancer_oof = 1.0 - oof_proba[:, idx_non]
-                y_true_cancer = (y_train.astype(str) != cfg.nonmalignant_label).astype(int)
+                p_cancer_oof = 1.0 - oof_proba[:, nonmal_idx].sum(axis=1)
+                y_true_cancer = (~_is_nonmalignant_mask(y_train, cfg.nonmalignant_label)).astype(int)
                 chosen_thr = choose_threshold_for_min_recall(
                     y_true=y_true_cancer,
                     y_score=p_cancer_oof,
@@ -1101,7 +1192,8 @@ class HierarchicalClassifier(BaseEstimator):
     def fit(self, X, y, **fit_params):
         """Entrena ambas etapas."""
         # Etapa 1: Binario (cancer vs nonMalignant)
-        y_binary = (y != self.nonmalignant_label).astype(int)
+        nm_mask = _is_nonmalignant_mask(y, self.nonmalignant_label)
+        y_binary = (~nm_mask).astype(int)
 
         stage1_fit_params = {
             k.replace("stage1__", ""): v
@@ -1111,7 +1203,7 @@ class HierarchicalClassifier(BaseEstimator):
         self.stage1_pipeline.fit(X, y_binary, **stage1_fit_params)
 
         # Etapa 2: Multiclase (solo tipos de cáncer)
-        cancer_mask = y != self.nonmalignant_label
+        cancer_mask = ~nm_mask
         X_cancer = X[cancer_mask]
         y_cancer = y[cancer_mask]
 
@@ -1133,6 +1225,7 @@ class HierarchicalClassifier(BaseEstimator):
         # Etapa 1: [p(nonMalignant), p(cancer)]
         stage1_proba = self.stage1_pipeline.predict_proba(X)
         p_cancer = stage1_proba[:, 1]
+        p_non = stage1_proba[:, 0]
 
         # Etapa 2: probabilidades sobre tipos de cáncer
         stage2_proba = self.stage2_pipeline.predict_proba(X)
@@ -1143,9 +1236,17 @@ class HierarchicalClassifier(BaseEstimator):
         n_classes = len(self.classes_)
         final_proba = np.zeros((n_samples, n_classes))
 
-        # Probabilidad de nonMalignant desde etapa 1
-        nonmal_idx = np.where(self.classes_ == self.nonmalignant_label)[0][0]
-        final_proba[:, nonmal_idx] = stage1_proba[:, 0]
+        # Distribuir p(nonMalignant) entre subclases nonMalignant (si hay clusters)
+        nonmal_indices = [
+            i for i, c in enumerate(self.classes_)
+            if _is_nonmalignant(c, self.nonmalignant_label)
+        ]
+        if len(nonmal_indices) == 1:
+            final_proba[:, nonmal_indices[0]] = p_non
+        else:
+            # Repartir uniformemente entre subclusters nonMalignant
+            for idx in nonmal_indices:
+                final_proba[:, idx] = p_non / len(nonmal_indices)
 
         # Distribuir probabilidad de cáncer entre tipos
         for i, cancer_type in enumerate(stage2_classes):
@@ -1168,7 +1269,18 @@ class HierarchicalClassifier(BaseEstimator):
         stage1_proba = self.stage1_pipeline.predict_proba(X)
         p_cancer = stage1_proba[:, 1]
 
-        predictions = np.full(len(X), self.nonmalignant_label, dtype=object)
+        # Para nonMalignant, asignar la subclase más probable del proba completo
+        nonmal_classes = [c for c in self.classes_ if _is_nonmalignant(c, self.nonmalignant_label)]
+        default_nonmal = nonmal_classes[0] if len(nonmal_classes) == 1 else self.nonmalignant_label
+        predictions = np.full(len(X), default_nonmal, dtype=object)
+
+        # Si hay subclusters, asignar la subclase más probable
+        if len(nonmal_classes) > 1:
+            full_proba = self.predict_proba(X)
+            nonmal_idx = [i for i, c in enumerate(self.classes_) if _is_nonmalignant(c, self.nonmalignant_label)]
+            best_nonmal = np.array(nonmal_idx)[np.argmax(full_proba[:, nonmal_idx], axis=1)]
+            for i in range(len(X)):
+                predictions[i] = self.classes_[best_nonmal[i]]
 
         cancer_mask = p_cancer >= self.stage1_threshold
         if cancer_mask.any():
@@ -1269,12 +1381,12 @@ def compute_hierarchical_metrics(
     f1_weighted = float(f1_score(y_true, y_pred, average="weighted", zero_division=0))
 
     # Métricas binarias (cáncer vs nonMalignant)
-    y_true_binary = (y_true != nonmalignant_label).astype(int)
-    y_pred_binary = (y_pred != nonmalignant_label).astype(int)
+    y_true_binary = (~_is_nonmalignant_mask(y_true, nonmalignant_label)).astype(int)
+    y_pred_binary = (~_is_nonmalignant_mask(y_pred, nonmalignant_label)).astype(int)
 
-    # Encontrar índice de nonMalignant para calcular p(cancer)
-    idx_nonmal = int(np.where(classes == nonmalignant_label)[0][0])
-    p_cancer = 1.0 - y_proba[:, idx_nonmal]
+    # Encontrar índices de nonMalignant para calcular p(cancer)
+    nonmal_idx = [i for i, c in enumerate(classes) if _is_nonmalignant(c, nonmalignant_label)]
+    p_cancer = 1.0 - y_proba[:, nonmal_idx].sum(axis=1)
 
     tn, fp, fn, tp = confusion_matrix(y_true_binary, y_pred_binary, labels=[0, 1]).ravel()
 
@@ -1463,30 +1575,35 @@ def run_hierarchical_training(
     df_train = load_parquet(cfg.train_path)
     df_test = load_parquet(cfg.test_path)
 
-    X_train, y_train = build_xy(
+    _build_xy = build_xy_with_clusters if cfg.cluster_col else build_xy
+    _extra_kw = {"cluster_col": cfg.cluster_col} if cfg.cluster_col else {}
+    X_train, y_train = _build_xy(
         df_train,
         feature_cols=feature_cols,
         class_group_col=cfg.class_group_col,
         patient_group_col=cfg.patient_group_col,
         nonmalignant_label=cfg.nonmalignant_label,
         malignant_label=cfg.malignant_label,
+        **_extra_kw,
     )
-    X_test, y_test = build_xy(
+    X_test, y_test = _build_xy(
         df_test,
         feature_cols=feature_cols,
         class_group_col=cfg.class_group_col,
         patient_group_col=cfg.patient_group_col,
         nonmalignant_label=cfg.nonmalignant_label,
         malignant_label=cfg.malignant_label,
+        **_extra_kw,
     )
 
     # Estadísticas de clases para etapa 1 (binario)
-    y_binary_train = (y_train != cfg.nonmalignant_label).astype(int)
+    nm_mask_train = _is_nonmalignant_mask(y_train, cfg.nonmalignant_label)
+    y_binary_train = (~nm_mask_train).astype(int)
     n_malignant = int(y_binary_train.sum())
     n_nonmalignant = len(y_binary_train) - n_malignant
 
     # Máscara y etiquetas para etapa 2 (solo cáncer)
-    cancer_mask_train = y_train != cfg.nonmalignant_label
+    cancer_mask_train = ~nm_mask_train
     y_cancer_train = y_train[cancer_mask_train]
 
     # Rutas de salida
