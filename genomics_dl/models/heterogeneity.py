@@ -704,3 +704,193 @@ def align_cluster_labels(
         )
 
     return labels_train_aligned, labels_test_aligned
+
+
+# ---------------------------------------------------------------------------
+# Unsupervised cluster-label generation for Malignant samples
+# ---------------------------------------------------------------------------
+
+
+def generate_malignant_clusters(
+    X_mal: pd.DataFrame,
+    pca_variance: float = 0.90,
+    n_clusters_range=range(2, 11),
+    random_state: int = 42,
+    verbose: bool = True,
+) -> Tuple[np.ndarray, object, object, dict, pd.DataFrame]:
+    """
+    Ejecuta el pipeline completo de clustering sobre muestras Malignant:
+      log1p → StandardScaler → PCA(pca_variance) → search_best_clustering
+
+    A diferencia de ``generate_nonmalignant_clusters``, aquí se busca
+    automáticamente el mejor número de clusters usando métricas internas
+    (silhouette, Calinski–Harabasz, Davies–Bouldin).
+
+    Parámetros
+    ----------
+    X_mal : DataFrame
+        Matriz de expresión (muestras × genes) de muestras Malignant.
+    pca_variance : float
+        Fracción de varianza explicada para auto-seleccionar componentes PCA.
+    n_clusters_range : range
+        Rango de valores de k a probar.
+    random_state : int
+        Semilla para reproducibilidad.
+    verbose : bool
+        Si True, imprime progreso de la búsqueda.
+
+    Devuelve
+    --------
+    labels : ndarray de shape (n_samples,)
+        Etiquetas de cluster (0, 1, ..., best_k-1).
+    scaler : StandardScaler ajustado.
+    pca : PCA ajustado.
+    best_summary : dict
+        Resumen de la mejor configuración (modelo, n_clusters, métricas).
+    df_search : DataFrame
+        Resultados de todas las configuraciones probadas.
+    """
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    X_log = np.log1p(X_mal.values if isinstance(X_mal, pd.DataFrame) else X_mal)
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_log)
+
+    pca = PCA(n_components=pca_variance, random_state=random_state)
+    X_pca = pca.fit_transform(X_scaled)
+
+    best_summary, df_search, _ = search_best_clustering(
+        X_pca,
+        n_clusters_range=n_clusters_range,
+        random_state=random_state,
+        verbose=verbose,
+    )
+
+    labels = best_summary["labels"]
+
+    return labels, scaler, pca, best_summary, df_search
+
+
+def generate_malignant_clusters_fixed_k(
+    X_mal: pd.DataFrame,
+    n_clusters: int,
+    pca_variance: float = 0.90,
+    random_state: int = 42,
+) -> Tuple[np.ndarray, object, object]:
+    """
+    Pipeline de clustering con k fijo para muestras Malignant:
+      log1p → StandardScaler → PCA(pca_variance) → KMeans(n_clusters)
+
+    Se usa para aplicar el k óptimo (encontrado en train) al conjunto de test,
+    ajustando el pipeline de forma independiente.
+
+    Parámetros
+    ----------
+    X_mal : DataFrame
+        Matriz de expresión (muestras × genes) de muestras Malignant.
+    n_clusters : int
+        Número de clusters (k óptimo del train).
+    pca_variance : float
+        Fracción de varianza explicada para auto-seleccionar componentes PCA.
+    random_state : int
+        Semilla para reproducibilidad.
+
+    Devuelve
+    --------
+    labels : ndarray de shape (n_samples,)
+        Etiquetas de cluster (0, 1, ..., n_clusters-1).
+    scaler : StandardScaler ajustado.
+    pca : PCA ajustado.
+    """
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    X_log = np.log1p(X_mal.values if isinstance(X_mal, pd.DataFrame) else X_mal)
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_log)
+
+    pca = PCA(n_components=pca_variance, random_state=random_state)
+    X_pca = pca.fit_transform(X_scaled)
+
+    km = KMeans(n_clusters=n_clusters, random_state=random_state, n_init="auto")
+    labels = km.fit_predict(X_pca)
+
+    return labels, scaler, pca
+
+
+def align_malignant_cluster_labels(
+    labels_train: np.ndarray,
+    labels_test: np.ndarray,
+    meta_train: pd.DataFrame,
+    meta_test: pd.DataFrame,
+    patient_group_col: str = "Patient_group",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Alinea las etiquetas de cluster de muestras Malignant entre train y test.
+
+    Para k > 2 la heurística de swap simple (usada en nonMalignant) no
+    funciona. Aquí se usa el **algoritmo húngaro** sobre la similitud
+    coseno de las distribuciones de ``Patient_group`` por cluster.
+
+    Parámetros
+    ----------
+    labels_train, labels_test : ndarray
+        Etiquetas de cluster para train y test respectivamente.
+    meta_train, meta_test : DataFrame
+        Metadatos con columna ``patient_group_col``.
+    patient_group_col : str
+        Nombre de la columna con el tipo de cáncer.
+
+    Devuelve
+    --------
+    (labels_train, labels_test_aligned) : tupla de ndarrays.
+        Train se devuelve sin cambios; test se relabela según el matching.
+    """
+    from scipy.optimize import linear_sum_assignment
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    unique_train = np.sort(np.unique(labels_train))
+    unique_test = np.sort(np.unique(labels_test))
+    k = len(unique_train)
+
+    # Construir vocabulario común de Patient_group
+    all_groups = sorted(
+        set(meta_train[patient_group_col].unique())
+        | set(meta_test[patient_group_col].unique())
+    )
+    group_to_idx = {g: i for i, g in enumerate(all_groups)}
+    n_groups = len(all_groups)
+
+    def _distribution_matrix(labels, meta, unique_labels):
+        """Matriz (n_clusters × n_groups) con proporciones."""
+        mat = np.zeros((len(unique_labels), n_groups))
+        pg = meta[patient_group_col].values
+        for ci, cl in enumerate(unique_labels):
+            mask = labels == cl
+            for g in pg[mask]:
+                mat[ci, group_to_idx[g]] += 1
+            row_sum = mat[ci].sum()
+            if row_sum > 0:
+                mat[ci] /= row_sum
+        return mat
+
+    dist_train = _distribution_matrix(labels_train, meta_train, unique_train)
+    dist_test = _distribution_matrix(labels_test, meta_test, unique_test)
+
+    # Matriz de coste: negativo de similitud coseno
+    sim = cosine_similarity(dist_train, dist_test)
+    cost = -sim
+
+    row_ind, col_ind = linear_sum_assignment(cost)
+
+    # Construir mapeo: test_label -> train_label
+    mapping = {}
+    for r, c in zip(row_ind, col_ind):
+        mapping[unique_test[c]] = unique_train[r]
+
+    labels_test_aligned = np.array([mapping[l] for l in labels_test])
+
+    return labels_train.copy(), labels_test_aligned
