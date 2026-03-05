@@ -1,0 +1,105 @@
+{
+  "cv_metrics": {
+    "accuracy": 0.725531914893617,
+    "balanced_accuracy": 0.7074003367405108,
+    "f1_macro": 0.6913625649080609,
+    "f1_weighted": 0.7046331049239127,
+    "log_loss": 0.6037994402545832,
+    "cancer_threshold": 0.46199999999999997,
+    "cancer_tn": 217,
+    "cancer_fp": 361,
+    "cancer_fn": 130,
+    "cancer_tp": 1172,
+    "cancer_fnr": 0.09984639016897082,
+    "cancer_recall_sensitivity": 0.9001536098310292,
+    "cancer_specificity": 0.3754325259515571,
+    "cancer_precision": 0.7645140247879973,
+    "cancer_roc_auc": 0.7567104640717768,
+    "cancer_pr_auc": 0.8694812417299267,
+    "per_class_report": {
+      "Malignant_0": {
+        "precision": 0.7602739726027398,
+        "recall": 0.8961937716262975,
+        "f1-score": 0.822657490735839,
+        "support": 867.0
+      },
+      "Malignant_1": {
+        "precision": 0.7240704500978473,
+        "recall": 0.8505747126436781,
+        "f1-score": 0.7822410147991543,
+        "support": 435.0
+      },
+      "nonMalignant": {
+        "precision": 0.6253602305475504,
+        "recall": 0.3754325259515571,
+        "f1-score": 0.46918918918918917,
+        "support": 578.0
+      },
+      "accuracy": 0.725531914893617,
+      "macro avg": {
+        "precision": 0.7032348844160459,
+        "recall": 0.7074003367405108,
+        "f1-score": 0.6913625649080609,
+        "support": 1880.0
+      },
+      "weighted avg": {
+        "precision": 0.7104182943061825,
+        "recall": 0.725531914893617,
+        "f1-score": 0.7046331049239127,
+        "support": 1880.0
+      }
+    }
+  },
+  "test_metrics": {
+    "accuracy": 0.7133757961783439,
+    "balanced_accuracy": 0.6925347300274244,
+    "f1_macro": 0.6761797509865043,
+    "f1_weighted": 0.6900462773013755,
+    "log_loss": 0.6158136035699805,
+    "cancer_threshold": 0.46199999999999997,
+    "cancer_tn": 51,
+    "cancer_fp": 94,
+    "cancer_fn": 32,
+    "cancer_tp": 294,
+    "cancer_fnr": 0.09815950920245399,
+    "cancer_recall_sensitivity": 0.901840490797546,
+    "cancer_specificity": 0.35172413793103446,
+    "cancer_precision": 0.7577319587628866,
+    "cancer_roc_auc": 0.7445843029405542,
+    "cancer_pr_auc": 0.8627880856303899,
+    "per_class_report": {
+      "Malignant_0": {
+        "precision": 0.746031746031746,
+        "recall": 0.9038461538461539,
+        "f1-score": 0.8173913043478261,
+        "support": 208.0
+      },
+      "Malignant_1": {
+        "precision": 0.7132352941176471,
+        "recall": 0.8220338983050848,
+        "f1-score": 0.7637795275590551,
+        "support": 118.0
+      },
+      "nonMalignant": {
+        "precision": 0.6144578313253012,
+        "recall": 0.35172413793103446,
+        "f1-score": 0.4473684210526316,
+        "support": 145.0
+      },
+      "accuracy": 0.7133757961783439,
+      "macro avg": {
+        "precision": 0.6912416238248982,
+        "recall": 0.6925347300274244,
+        "f1-score": 0.6761797509865043,
+        "support": 471.0
+      },
+      "weighted avg": {
+        "precision": 0.6973094552497967,
+        "recall": 0.7133757961783439,
+        "f1-score": 0.6900462773013755,
+        "support": 471.0
+      }
+    }
+  },
+  "chosen_cancer_threshold": 0.46199999999999997
+}
