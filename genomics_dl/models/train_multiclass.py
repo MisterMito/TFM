@@ -212,6 +212,84 @@ def build_xy_with_clusters(
     return X, y
 
 
+# ---------------------------------------------------------------------------
+# Helpers para soporte de Malignant subdividido (clusters)
+# ---------------------------------------------------------------------------
+
+MALIGNANT_CLUSTER_PREFIX = "Malignant"
+
+
+def _is_malignant_cluster(label: str) -> bool:
+    """Devuelve True si *label* es un cluster malignant (``Malignant_0``, ``Malignant_1``, ...)."""
+    s = str(label)
+    return s.startswith(MALIGNANT_CLUSTER_PREFIX + "_") and s[len(MALIGNANT_CLUSTER_PREFIX) + 1:].isdigit()
+
+
+def _is_malignant_cluster_mask(y) -> np.ndarray:
+    """Versión vectorizada de ``_is_malignant_cluster``."""
+    y_str = pd.Series(y).astype(str)
+    return y_str.str.match(r"^Malignant_\d+$").to_numpy()
+
+
+def build_y_multiclass_with_malignant_clusters(
+    df: pd.DataFrame,
+    class_group_col: str,
+    patient_group_col: str,
+    cluster_col: str = "mal_cluster",
+    nonmalignant_label: str = "nonMalignant",
+    malignant_label: str = "Malignant",
+) -> np.ndarray:
+    """
+    Construye etiquetas multiclass con clusters malignos:
+      - Class_group == nonMalignant → nonMalignant (sin cambios)
+      - Class_group == Malignant    → Malignant_{cluster} (reemplaza Patient_group)
+    """
+    cg = df[class_group_col].astype(str)
+    cluster = df[cluster_col]
+
+    # Validar Class_group
+    unknown_mask = ~cg.isin([str(nonmalignant_label), str(malignant_label)])
+    if unknown_mask.any():
+        bad = df.loc[unknown_mask, class_group_col].unique().tolist()
+        raise ValueError(
+            f"Valores inesperados en {class_group_col}: {bad}. "
+            f"Esperados: [{nonmalignant_label}, {malignant_label}]"
+        )
+
+    y = np.full(len(df), str(nonmalignant_label), dtype=object)
+    mal_mask = cg == str(malignant_label)
+    for idx in np.where(mal_mask.to_numpy())[0]:
+        cl = cluster.iloc[idx]
+        if pd.notna(cl):
+            y[idx] = f"{MALIGNANT_CLUSTER_PREFIX}_{int(cl)}"
+        else:
+            y[idx] = "Malignant_unknown"
+
+    return y.astype(str)
+
+
+def build_xy_with_malignant_clusters(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    cluster_col: str = "mal_cluster",
+    class_group_col: str = "Class_group",
+    patient_group_col: str = "Patient_group",
+    nonmalignant_label: str = "nonMalignant",
+    malignant_label: str = "Malignant",
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Equivalente a ``build_xy`` pero usa ``build_y_multiclass_with_malignant_clusters``."""
+    X = df.loc[:, feature_cols].copy()
+    y = build_y_multiclass_with_malignant_clusters(
+        df,
+        class_group_col=class_group_col,
+        patient_group_col=patient_group_col,
+        cluster_col=cluster_col,
+        nonmalignant_label=nonmalignant_label,
+        malignant_label=malignant_label,
+    )
+    return X, y
+
+
 # Config + Pipelines
 @dataclass(frozen=True)
 class MulticlassTrainConfig:
@@ -262,7 +340,8 @@ class MulticlassTrainConfig:
     random_state: int = 42
 
     # Clusters no supervisados (None = comportamiento original sin clusters)
-    cluster_col: Optional[str] = None
+    cluster_col: Optional[str] = None  # nonMalignant clusters
+    malignant_cluster_col: Optional[str] = None  # Malignant clusters
 
 
 @dataclass(frozen=True)
@@ -323,7 +402,8 @@ class HierarchicalTrainConfig:
     output_figures_dir: str = "reports/figures/hierarchical"
 
     # Clusters no supervisados (None = comportamiento original sin clusters)
-    cluster_col: Optional[str] = None
+    cluster_col: Optional[str] = None  # nonMalignant clusters
+    malignant_cluster_col: Optional[str] = None  # Malignant clusters
 
 
 def _build_class_weight(cfg: MulticlassTrainConfig, y_train: np.ndarray) -> Optional[dict[str, float]]:
@@ -779,8 +859,15 @@ def run_training(cfg: MulticlassTrainConfig, feature_cols: list[str]) -> dict[st
     df_train = load_parquet(cfg.train_path)
     df_test = load_parquet(cfg.test_path)
 
-    _build_xy = build_xy_with_clusters if cfg.cluster_col else build_xy
-    _extra_kw = {"cluster_col": cfg.cluster_col} if cfg.cluster_col else {}
+    if cfg.malignant_cluster_col:
+        _build_xy = build_xy_with_malignant_clusters
+        _extra_kw = {"cluster_col": cfg.malignant_cluster_col}
+    elif cfg.cluster_col:
+        _build_xy = build_xy_with_clusters
+        _extra_kw = {"cluster_col": cfg.cluster_col}
+    else:
+        _build_xy = build_xy
+        _extra_kw = {}
     X_train, y_train = _build_xy(
         df_train,
         feature_cols=feature_cols,
@@ -1575,8 +1662,15 @@ def run_hierarchical_training(
     df_train = load_parquet(cfg.train_path)
     df_test = load_parquet(cfg.test_path)
 
-    _build_xy = build_xy_with_clusters if cfg.cluster_col else build_xy
-    _extra_kw = {"cluster_col": cfg.cluster_col} if cfg.cluster_col else {}
+    if cfg.malignant_cluster_col:
+        _build_xy = build_xy_with_malignant_clusters
+        _extra_kw = {"cluster_col": cfg.malignant_cluster_col}
+    elif cfg.cluster_col:
+        _build_xy = build_xy_with_clusters
+        _extra_kw = {"cluster_col": cfg.cluster_col}
+    else:
+        _build_xy = build_xy
+        _extra_kw = {}
     X_train, y_train = _build_xy(
         df_train,
         feature_cols=feature_cols,
