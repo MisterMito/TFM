@@ -16,7 +16,7 @@ from typing import Sequence, Tuple, Optional, Union
 
 import matplotlib.pyplot as plt
 import seaborn as sns
-from scipy.stats import ttest_ind
+from scipy.stats import chi2_contingency, kruskal, ttest_ind
 import umap
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
@@ -894,3 +894,161 @@ def align_malignant_cluster_labels(
     labels_test_aligned = np.array([mapping[l] for l in labels_test])
 
     return labels_train.copy(), labels_test_aligned
+
+
+# ---------------------------------------------------------------------------
+# Statistical association between clinical variables and cancer types
+# ---------------------------------------------------------------------------
+
+
+def compute_clinical_associations(
+    df: pd.DataFrame,
+    target_col: str = "Patient_group",
+    age_col: str = "Age",
+    sex_col: str = "Sex",
+    sex_missing_value: str = "n.a.",
+) -> dict:
+    """
+    Calcula asociación estadística entre variables clínicas y tipos de cáncer.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Datos con columnas de metadata y target.
+    target_col : str
+        Columna objetivo (e.g. Patient_group).
+    age_col : str
+        Columna de edad.
+    sex_col : str
+        Columna de sexo.
+    sex_missing_value : str
+        Valor que indica dato faltante en sexo.
+
+    Returns
+    -------
+    dict con claves "sex" y "age", cada una con resultados del test.
+    """
+    results: dict = {}
+
+    # --- Sex: chi-cuadrado de independencia ---
+    if sex_col in df.columns:
+        df_sex = df[[sex_col, target_col]].copy()
+        df_sex = df_sex[df_sex[sex_col] != sex_missing_value].dropna(
+            subset=[sex_col, target_col]
+        )
+        contingency = pd.crosstab(df_sex[target_col], df_sex[sex_col])
+        chi2, p_value, dof, expected = chi2_contingency(contingency)
+
+        # V de Cramer
+        n = contingency.values.sum()
+        k = min(contingency.shape) - 1
+        cramers_v = np.sqrt(chi2 / (n * k)) if k > 0 and n > 0 else 0.0
+
+        results["sex"] = {
+            "test": "chi2_contingency",
+            "chi2": float(chi2),
+            "p_value": float(p_value),
+            "dof": int(dof),
+            "cramers_v": float(cramers_v),
+            "contingency_table": contingency,
+        }
+
+    # --- Age: Kruskal-Wallis ---
+    if age_col in df.columns:
+        df_age = df[[age_col, target_col]].dropna(subset=[age_col, target_col])
+        groups = df_age.groupby(target_col)[age_col]
+        group_arrays = [g.values for _, g in groups]
+
+        if len(group_arrays) >= 2:
+            stat, p_value = kruskal(*group_arrays)
+        else:
+            stat, p_value = np.nan, np.nan
+
+        descriptive = groups.agg(["count", "mean", "median", "std", "min", "max"])
+
+        results["age"] = {
+            "test": "kruskal_wallis",
+            "statistic": float(stat),
+            "p_value": float(p_value),
+            "descriptive_by_group": descriptive,
+        }
+
+    return results
+
+
+def plot_clinical_associations(
+    df: pd.DataFrame,
+    target_col: str = "Patient_group",
+    age_col: str = "Age",
+    sex_col: str = "Sex",
+    sex_missing_value: str = "n.a.",
+    output_dir: Optional[Union[Path, str]] = None,
+    figsize_age: Tuple[int, int] = (14, 6),
+    figsize_sex: Tuple[int, int] = (14, 6),
+) -> None:
+    """
+    Genera visualizaciones de asociación entre variables clínicas y tipos de cáncer.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Datos con columnas clínicas y target.
+    target_col : str
+        Columna objetivo.
+    age_col, sex_col : str
+        Columnas clínicas.
+    sex_missing_value : str
+        Valor de dato faltante en sexo.
+    output_dir : Path or str, optional
+        Directorio donde guardar las figuras. Si None, solo muestra.
+    figsize_age, figsize_sex : tuple
+        Tamaños de figura.
+    """
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Boxplot de Age por tipo de cáncer ---
+    if age_col in df.columns:
+        df_age = df[[age_col, target_col]].dropna(subset=[age_col])
+        order = (
+            df_age.groupby(target_col)[age_col]
+            .median()
+            .sort_values()
+            .index.tolist()
+        )
+
+        fig, ax = plt.subplots(figsize=figsize_age)
+        sns.boxplot(data=df_age, x=target_col, y=age_col, order=order, ax=ax)
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
+        ax.set_title(f"Distribución de {age_col} por {target_col}")
+        ax.set_xlabel(target_col)
+        ax.set_ylabel(age_col)
+        plt.tight_layout()
+
+        if output_dir is not None:
+            fig.savefig(output_dir / "age_by_cancer_type.png", dpi=200)
+        plt.show()
+        plt.close(fig)
+
+    # --- Barplot de Sex por tipo de cáncer ---
+    if sex_col in df.columns:
+        df_sex = df[[sex_col, target_col]].copy()
+        df_sex = df_sex[df_sex[sex_col] != sex_missing_value]
+
+        ct = pd.crosstab(df_sex[target_col], df_sex[sex_col], normalize="index")
+        order = ct.index.tolist()
+
+        fig, ax = plt.subplots(figsize=figsize_sex)
+        ct.loc[order].plot(kind="bar", stacked=True, ax=ax, colormap="Set2")
+        ax.set_title(f"Proporción de {sex_col} por {target_col}")
+        ax.set_xlabel(target_col)
+        ax.set_ylabel("Proporción")
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
+        ax.legend(title=sex_col, bbox_to_anchor=(1.05, 1), loc="upper left")
+        plt.tight_layout()
+
+        if output_dir is not None:
+            fig.savefig(output_dir / "sex_by_cancer_type.png", dpi=200)
+        plt.show()
+        plt.close(fig)
