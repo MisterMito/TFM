@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -228,3 +228,121 @@ class PCAAuto(BaseEstimator, TransformerMixin):
     def get_feature_names_out(self, input_features=None):
         check_is_fitted(self, "n_components_")
         return np.array([f"PC{i+1}" for i in range(self.n_components_)], dtype=object)
+
+
+class ClinicalFeaturePreprocessor(BaseEstimator, TransformerMixin):
+    """
+    Preprocesa features clínicas (Age, Sex) y cluster dummies dentro del pipeline.
+
+    Aprende estadísticos del conjunto de entrenamiento (fit) y los aplica
+    en transform, evitando data leakage.
+
+    Parameters
+    ----------
+    age_col : str or None
+        Nombre de la columna de edad. None para no incluir.
+    sex_col : str or None
+        Nombre de la columna de sexo. None para no incluir.
+    cluster_cols : sequence of str or None
+        Nombres de columnas de cluster (ya one-hot encoded). Se pasan tal cual.
+    age_impute_strategy : str
+        Estrategia de imputación de Age: "median" o "mean".
+    sex_missing_value : str
+        Valor que indica dato faltante en Sex (default "n.a.").
+    """
+
+    def __init__(
+        self,
+        age_col: Optional[str] = None,
+        sex_col: Optional[str] = None,
+        cluster_cols: Optional[Sequence[str]] = None,
+        age_impute_strategy: str = "median",
+        sex_missing_value: str = "n.a.",
+    ):
+        self.age_col = age_col
+        self.sex_col = sex_col
+        self.cluster_cols = cluster_cols
+        self.age_impute_strategy = age_impute_strategy
+        self.sex_missing_value = sex_missing_value
+
+    def fit(self, X, y=None):
+        X_df = _to_df(X)
+
+        # --- Age ---
+        if self.age_col is not None:
+            age = X_df[self.age_col].astype(float)
+            if self.age_impute_strategy == "median":
+                self.age_fill_ = float(age.median())
+            elif self.age_impute_strategy == "mean":
+                self.age_fill_ = float(age.mean())
+            else:
+                raise ValueError(
+                    f"age_impute_strategy desconocido: {self.age_impute_strategy}"
+                )
+            age_filled = age.fillna(self.age_fill_)
+            self.age_mean_ = float(age_filled.mean())
+            self.age_std_ = float(age_filled.std())
+            if self.age_std_ < 1e-8:
+                self.age_std_ = 1.0
+
+        # --- Sex ---
+        if self.sex_col is not None:
+            sex = X_df[self.sex_col].astype(str)
+            valid = sex[sex != self.sex_missing_value]
+            self.sex_mode_ = str(valid.mode().iloc[0])
+            self.sex_categories_ = sorted(valid.unique().tolist())
+
+        # --- Cluster dummies ---
+        if self.cluster_cols is not None:
+            self.cluster_cols_ = list(self.cluster_cols)
+        else:
+            self.cluster_cols_ = []
+
+        # Build output column list
+        self.output_cols_: list[str] = []
+        if self.age_col is not None:
+            self.output_cols_.append("Age_scaled")
+        if self.sex_col is not None:
+            self.output_cols_.extend(
+                [f"Sex_{cat}" for cat in self.sex_categories_]
+            )
+        self.output_cols_.extend(self.cluster_cols_)
+
+        return self
+
+    def transform(self, X):
+        check_is_fitted(self, "output_cols_")
+        X_df = _to_df(X)
+        parts: list[pd.Series | pd.DataFrame] = []
+
+        # --- Age ---
+        if self.age_col is not None:
+            age = X_df[self.age_col].astype(float).fillna(self.age_fill_)
+            age_scaled = (age - self.age_mean_) / self.age_std_
+            parts.append(age_scaled.rename("Age_scaled"))
+
+        # --- Sex ---
+        if self.sex_col is not None:
+            sex = X_df[self.sex_col].astype(str).replace(
+                self.sex_missing_value, self.sex_mode_
+            )
+            dummies = pd.DataFrame(0, index=X_df.index,
+                                   columns=[f"Sex_{c}" for c in self.sex_categories_])
+            for cat in self.sex_categories_:
+                dummies[f"Sex_{cat}"] = (sex == cat).astype(int)
+            parts.append(dummies)
+
+        # --- Cluster dummies ---
+        if self.cluster_cols_:
+            cluster_df = X_df[self.cluster_cols_].fillna(0).astype(float)
+            parts.append(cluster_df)
+
+        if not parts:
+            return pd.DataFrame(index=X_df.index)
+
+        result = pd.concat(parts, axis=1)
+        return result
+
+    def get_feature_names_out(self, input_features=None):
+        check_is_fitted(self, "output_cols_")
+        return np.array(self.output_cols_, dtype=object)
