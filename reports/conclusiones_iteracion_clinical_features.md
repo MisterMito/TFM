@@ -1,6 +1,6 @@
 # Conclusiones — Iteración: Cluster labels y variables clínicas como features predictoras (X)
 
-*Rama: feat/unsupervised_laber*
+*Rama: feat/unsupervised_label*
 
 ## Resumen ejecutivo
 
