@@ -1,0 +1,48 @@
+train_path: ../data/processed/gse183635_tep_tpm_train_clustered.parquet
+test_path: ../data/processed/gse183635_tep_tpm_test_clustered.parquet
+class_group_col: Class_group
+patient_group_col: Patient_group
+nonmalignant_label: nonMalignant
+malignant_label: Malignant
+model_name: hierarchical_clinical_final
+model_version: v0.5.0
+stage1_clf_name: xgboost
+stage1_clf_params:
+  n_estimators: 650
+  max_depth: 6
+  learning_rate: 0.1
+stage1_min_recall: 0.9
+stage1_threshold_objective: specificity
+stage1_pos_weight: null
+stage2_clf_name: lightgbm
+stage2_clf_params:
+  n_estimators: 800
+  max_depth: 8
+  learning_rate: 0.05
+stage2_class_weighting: balanced
+stage2_custom_weights: null
+stage2_use_smote: false
+use_pca: false
+var_quantile: 0.15
+selector_on_log: false
+pca_var_threshold: 0.9
+max_pca_components: null
+variance_filter_threshold: 1.0e-06
+cv_splits: 8
+skip_cv_for_sweep: false
+random_state: 42
+experiment_name: gse183635_hierarchical_clinical
+tracking_uri: null
+save_local_bundle: true
+save_plots: true
+mlflow_log_artifacts: true
+mlflow_log_model: true
+output_models_dir: models
+output_figures_dir: reports/figures/hierarchical_clinical
+cluster_col: null
+malignant_cluster_col: mal_cluster
+cluster_as_feature: true
+nm_cluster_col: nm_cluster
+age_col: Age
+sex_col: Sex
+age_impute_strategy: median
