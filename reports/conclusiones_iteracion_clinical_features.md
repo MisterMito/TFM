@@ -1,5 +1,7 @@
 # Conclusiones — Iteración: Cluster labels y variables clínicas como features predictoras (X)
 
+*Rama: feat/unsupervised_laber*
+
 ## Resumen ejecutivo
 
 Esta iteración movió las etiquetas de clustering no supervisado (mal_cluster, nm_cluster) de la variable objetivo (y) a las variables predictoras (X), e incorporó Age y Sex como features adicionales. Los resultados muestran **mejoras significativas** en ambos enfoques (multiclase y jerárquico), especialmente en la detección de cáncer, comparado con las versiones anteriores.
