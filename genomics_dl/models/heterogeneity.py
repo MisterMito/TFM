@@ -16,7 +16,7 @@ from typing import Sequence, Tuple, Optional, Union
 
 import matplotlib.pyplot as plt
 import seaborn as sns
-from scipy.stats import ttest_ind
+from scipy.stats import chi2_contingency, kruskal, ttest_ind
 import umap
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
@@ -589,3 +589,466 @@ def plot_umap(
 
     plt.tight_layout()
     plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Unsupervised cluster-label generation for nonMalignant samples
+# ---------------------------------------------------------------------------
+
+
+def generate_nonmalignant_clusters(
+    X_nm: pd.DataFrame,
+    pca_variance: float = 0.90,
+    n_clusters: int = 2,
+    random_state: int = 42,
+) -> Tuple[np.ndarray, object, object]:
+    """
+    Ejecuta el pipeline completo de clustering sobre muestras nonMalignant:
+      log1p → StandardScaler → PCA(pca_variance) → KMeans(n_clusters)
+
+    Parámetros
+    ----------
+    X_nm : DataFrame
+        Matriz de expresión (muestras × genes) de muestras nonMalignant.
+    pca_variance : float
+        Fracción de varianza explicada para auto-seleccionar componentes PCA.
+    n_clusters : int
+        Número de clusters para KMeans.
+    random_state : int
+        Semilla para reproducibilidad.
+
+    Devuelve
+    --------
+    labels : ndarray de shape (n_samples,)
+        Etiquetas de cluster (0, 1, ..., n_clusters-1).
+    scaler : StandardScaler ajustado.
+    pca : PCA ajustado.
+    """
+    from sklearn.cluster import KMeans
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    X_log = np.log1p(X_nm.values if isinstance(X_nm, pd.DataFrame) else X_nm)
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_log)
+
+    pca = PCA(n_components=pca_variance, random_state=random_state)
+    X_pca = pca.fit_transform(X_scaled)
+
+    km = KMeans(n_clusters=n_clusters, random_state=random_state, n_init="auto")
+    labels = km.fit_predict(X_pca)
+
+    return labels, scaler, pca
+
+
+def align_cluster_labels(
+    labels_train: np.ndarray,
+    labels_test: np.ndarray,
+    meta_train: pd.DataFrame,
+    meta_test: pd.DataFrame,
+    reference_group: str = "Asymptomatic controls",
+    patient_group_col: str = "Patient_group",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Alinea las etiquetas de cluster entre train y test usando una heurística:
+    el cluster con mayor proporción de ``reference_group`` se asigna como
+    cluster 0 en ambos conjuntos.
+
+    Si la asignación ya coincide, no se modifica nada. Si difiere, se
+    intercambian las etiquetas del conjunto que tenga la asignación invertida.
+
+    Parámetros
+    ----------
+    labels_train, labels_test : ndarray
+        Etiquetas de cluster (e.g. 0/1) para train y test respectivamente.
+    meta_train, meta_test : DataFrame
+        Metadatos con columna ``patient_group_col``.
+    reference_group : str
+        Grupo de referencia para la alineación (por defecto "Asymptomatic controls").
+    patient_group_col : str
+        Nombre de la columna con el grupo del paciente.
+
+    Devuelve
+    --------
+    (labels_train_aligned, labels_test_aligned) : tupla de ndarrays.
+    """
+
+    def _reference_cluster(labels, meta):
+        """Devuelve el cluster con más muestras de reference_group."""
+        pg = meta[patient_group_col].values
+        counts = {}
+        for cl in np.unique(labels):
+            mask = labels == cl
+            counts[cl] = np.sum(pg[mask] == reference_group)
+        return max(counts, key=counts.get)
+
+    ref_train = _reference_cluster(labels_train, meta_train)
+    ref_test = _reference_cluster(labels_test, meta_test)
+
+    labels_train_aligned = labels_train.copy()
+    labels_test_aligned = labels_test.copy()
+
+    # Normalizar train: el cluster de referencia debe ser 0
+    if ref_train != 0:
+        labels_train_aligned = np.where(
+            labels_train == 0, ref_train,
+            np.where(labels_train == ref_train, 0, labels_train),
+        )
+
+    # Normalizar test: el cluster de referencia debe ser 0
+    if ref_test != 0:
+        labels_test_aligned = np.where(
+            labels_test == 0, ref_test,
+            np.where(labels_test == ref_test, 0, labels_test),
+        )
+
+    return labels_train_aligned, labels_test_aligned
+
+
+# ---------------------------------------------------------------------------
+# Unsupervised cluster-label generation for Malignant samples
+# ---------------------------------------------------------------------------
+
+
+def generate_malignant_clusters(
+    X_mal: pd.DataFrame,
+    pca_variance: float = 0.90,
+    n_clusters_range=range(2, 11),
+    random_state: int = 42,
+    verbose: bool = True,
+) -> Tuple[np.ndarray, object, object, dict, pd.DataFrame]:
+    """
+    Ejecuta el pipeline completo de clustering sobre muestras Malignant:
+      log1p → StandardScaler → PCA(pca_variance) → search_best_clustering
+
+    A diferencia de ``generate_nonmalignant_clusters``, aquí se busca
+    automáticamente el mejor número de clusters usando métricas internas
+    (silhouette, Calinski–Harabasz, Davies–Bouldin).
+
+    Parámetros
+    ----------
+    X_mal : DataFrame
+        Matriz de expresión (muestras × genes) de muestras Malignant.
+    pca_variance : float
+        Fracción de varianza explicada para auto-seleccionar componentes PCA.
+    n_clusters_range : range
+        Rango de valores de k a probar.
+    random_state : int
+        Semilla para reproducibilidad.
+    verbose : bool
+        Si True, imprime progreso de la búsqueda.
+
+    Devuelve
+    --------
+    labels : ndarray de shape (n_samples,)
+        Etiquetas de cluster (0, 1, ..., best_k-1).
+    scaler : StandardScaler ajustado.
+    pca : PCA ajustado.
+    best_summary : dict
+        Resumen de la mejor configuración (modelo, n_clusters, métricas).
+    df_search : DataFrame
+        Resultados de todas las configuraciones probadas.
+    """
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    X_log = np.log1p(X_mal.values if isinstance(X_mal, pd.DataFrame) else X_mal)
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_log)
+
+    pca = PCA(n_components=pca_variance, random_state=random_state)
+    X_pca = pca.fit_transform(X_scaled)
+
+    best_summary, df_search, _ = search_best_clustering(
+        X_pca,
+        n_clusters_range=n_clusters_range,
+        random_state=random_state,
+        verbose=verbose,
+    )
+
+    labels = best_summary["labels"]
+
+    return labels, scaler, pca, best_summary, df_search
+
+
+def generate_malignant_clusters_fixed_k(
+    X_mal: pd.DataFrame,
+    n_clusters: int,
+    pca_variance: float = 0.90,
+    random_state: int = 42,
+) -> Tuple[np.ndarray, object, object]:
+    """
+    Pipeline de clustering con k fijo para muestras Malignant:
+      log1p → StandardScaler → PCA(pca_variance) → KMeans(n_clusters)
+
+    Se usa para aplicar el k óptimo (encontrado en train) al conjunto de test,
+    ajustando el pipeline de forma independiente.
+
+    Parámetros
+    ----------
+    X_mal : DataFrame
+        Matriz de expresión (muestras × genes) de muestras Malignant.
+    n_clusters : int
+        Número de clusters (k óptimo del train).
+    pca_variance : float
+        Fracción de varianza explicada para auto-seleccionar componentes PCA.
+    random_state : int
+        Semilla para reproducibilidad.
+
+    Devuelve
+    --------
+    labels : ndarray de shape (n_samples,)
+        Etiquetas de cluster (0, 1, ..., n_clusters-1).
+    scaler : StandardScaler ajustado.
+    pca : PCA ajustado.
+    """
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    X_log = np.log1p(X_mal.values if isinstance(X_mal, pd.DataFrame) else X_mal)
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_log)
+
+    pca = PCA(n_components=pca_variance, random_state=random_state)
+    X_pca = pca.fit_transform(X_scaled)
+
+    km = KMeans(n_clusters=n_clusters, random_state=random_state, n_init="auto")
+    labels = km.fit_predict(X_pca)
+
+    return labels, scaler, pca
+
+
+def align_malignant_cluster_labels(
+    labels_train: np.ndarray,
+    labels_test: np.ndarray,
+    meta_train: pd.DataFrame,
+    meta_test: pd.DataFrame,
+    patient_group_col: str = "Patient_group",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Alinea las etiquetas de cluster de muestras Malignant entre train y test.
+
+    Para k > 2 la heurística de swap simple (usada en nonMalignant) no
+    funciona. Aquí se usa el **algoritmo húngaro** sobre la similitud
+    coseno de las distribuciones de ``Patient_group`` por cluster.
+
+    Parámetros
+    ----------
+    labels_train, labels_test : ndarray
+        Etiquetas de cluster para train y test respectivamente.
+    meta_train, meta_test : DataFrame
+        Metadatos con columna ``patient_group_col``.
+    patient_group_col : str
+        Nombre de la columna con el tipo de cáncer.
+
+    Devuelve
+    --------
+    (labels_train, labels_test_aligned) : tupla de ndarrays.
+        Train se devuelve sin cambios; test se relabela según el matching.
+    """
+    from scipy.optimize import linear_sum_assignment
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    unique_train = np.sort(np.unique(labels_train))
+    unique_test = np.sort(np.unique(labels_test))
+    k = len(unique_train)
+
+    # Construir vocabulario común de Patient_group
+    all_groups = sorted(
+        set(meta_train[patient_group_col].unique())
+        | set(meta_test[patient_group_col].unique())
+    )
+    group_to_idx = {g: i for i, g in enumerate(all_groups)}
+    n_groups = len(all_groups)
+
+    def _distribution_matrix(labels, meta, unique_labels):
+        """Matriz (n_clusters × n_groups) con proporciones."""
+        mat = np.zeros((len(unique_labels), n_groups))
+        pg = meta[patient_group_col].values
+        for ci, cl in enumerate(unique_labels):
+            mask = labels == cl
+            for g in pg[mask]:
+                mat[ci, group_to_idx[g]] += 1
+            row_sum = mat[ci].sum()
+            if row_sum > 0:
+                mat[ci] /= row_sum
+        return mat
+
+    dist_train = _distribution_matrix(labels_train, meta_train, unique_train)
+    dist_test = _distribution_matrix(labels_test, meta_test, unique_test)
+
+    # Matriz de coste: negativo de similitud coseno
+    sim = cosine_similarity(dist_train, dist_test)
+    cost = -sim
+
+    row_ind, col_ind = linear_sum_assignment(cost)
+
+    # Construir mapeo: test_label -> train_label
+    mapping = {}
+    for r, c in zip(row_ind, col_ind):
+        mapping[unique_test[c]] = unique_train[r]
+
+    labels_test_aligned = np.array([mapping[l] for l in labels_test])
+
+    return labels_train.copy(), labels_test_aligned
+
+
+# ---------------------------------------------------------------------------
+# Statistical association between clinical variables and cancer types
+# ---------------------------------------------------------------------------
+
+
+def compute_clinical_associations(
+    df: pd.DataFrame,
+    target_col: str = "Patient_group",
+    age_col: str = "Age",
+    sex_col: str = "Sex",
+    sex_missing_value: str = "n.a.",
+) -> dict:
+    """
+    Calcula asociación estadística entre variables clínicas y tipos de cáncer.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Datos con columnas de metadata y target.
+    target_col : str
+        Columna objetivo (e.g. Patient_group).
+    age_col : str
+        Columna de edad.
+    sex_col : str
+        Columna de sexo.
+    sex_missing_value : str
+        Valor que indica dato faltante en sexo.
+
+    Returns
+    -------
+    dict con claves "sex" y "age", cada una con resultados del test.
+    """
+    results: dict = {}
+
+    # --- Sex: chi-cuadrado de independencia ---
+    if sex_col in df.columns:
+        df_sex = df[[sex_col, target_col]].copy()
+        df_sex = df_sex[df_sex[sex_col] != sex_missing_value].dropna(
+            subset=[sex_col, target_col]
+        )
+        contingency = pd.crosstab(df_sex[target_col], df_sex[sex_col])
+        chi2, p_value, dof, expected = chi2_contingency(contingency)
+
+        # V de Cramer
+        n = contingency.values.sum()
+        k = min(contingency.shape) - 1
+        cramers_v = np.sqrt(chi2 / (n * k)) if k > 0 and n > 0 else 0.0
+
+        results["sex"] = {
+            "test": "chi2_contingency",
+            "chi2": float(chi2),
+            "p_value": float(p_value),
+            "dof": int(dof),
+            "cramers_v": float(cramers_v),
+            "contingency_table": contingency,
+        }
+
+    # --- Age: Kruskal-Wallis ---
+    if age_col in df.columns:
+        df_age = df[[age_col, target_col]].dropna(subset=[age_col, target_col])
+        groups = df_age.groupby(target_col)[age_col]
+        group_arrays = [g.values for _, g in groups]
+
+        if len(group_arrays) >= 2:
+            stat, p_value = kruskal(*group_arrays)
+        else:
+            stat, p_value = np.nan, np.nan
+
+        descriptive = groups.agg(["count", "mean", "median", "std", "min", "max"])
+
+        results["age"] = {
+            "test": "kruskal_wallis",
+            "statistic": float(stat),
+            "p_value": float(p_value),
+            "descriptive_by_group": descriptive,
+        }
+
+    return results
+
+
+def plot_clinical_associations(
+    df: pd.DataFrame,
+    target_col: str = "Patient_group",
+    age_col: str = "Age",
+    sex_col: str = "Sex",
+    sex_missing_value: str = "n.a.",
+    output_dir: Optional[Union[Path, str]] = None,
+    figsize_age: Tuple[int, int] = (14, 6),
+    figsize_sex: Tuple[int, int] = (14, 6),
+) -> None:
+    """
+    Genera visualizaciones de asociación entre variables clínicas y tipos de cáncer.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Datos con columnas clínicas y target.
+    target_col : str
+        Columna objetivo.
+    age_col, sex_col : str
+        Columnas clínicas.
+    sex_missing_value : str
+        Valor de dato faltante en sexo.
+    output_dir : Path or str, optional
+        Directorio donde guardar las figuras. Si None, solo muestra.
+    figsize_age, figsize_sex : tuple
+        Tamaños de figura.
+    """
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Boxplot de Age por tipo de cáncer ---
+    if age_col in df.columns:
+        df_age = df[[age_col, target_col]].dropna(subset=[age_col])
+        order = (
+            df_age.groupby(target_col)[age_col]
+            .median()
+            .sort_values()
+            .index.tolist()
+        )
+
+        fig, ax = plt.subplots(figsize=figsize_age)
+        sns.boxplot(data=df_age, x=target_col, y=age_col, order=order, ax=ax)
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
+        ax.set_title(f"Distribución de {age_col} por {target_col}")
+        ax.set_xlabel(target_col)
+        ax.set_ylabel(age_col)
+        plt.tight_layout()
+
+        if output_dir is not None:
+            fig.savefig(output_dir / "age_by_cancer_type.png", dpi=200)
+        plt.show()
+        plt.close(fig)
+
+    # --- Barplot de Sex por tipo de cáncer ---
+    if sex_col in df.columns:
+        df_sex = df[[sex_col, target_col]].copy()
+        df_sex = df_sex[df_sex[sex_col] != sex_missing_value]
+
+        ct = pd.crosstab(df_sex[target_col], df_sex[sex_col], normalize="index")
+        order = ct.index.tolist()
+
+        fig, ax = plt.subplots(figsize=figsize_sex)
+        ct.loc[order].plot(kind="bar", stacked=True, ax=ax, colormap="Set2")
+        ax.set_title(f"Proporción de {sex_col} por {target_col}")
+        ax.set_xlabel(target_col)
+        ax.set_ylabel("Proporción")
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
+        ax.legend(title=sex_col, bbox_to_anchor=(1.05, 1), loc="upper left")
+        plt.tight_layout()
+
+        if output_dir is not None:
+            fig.savefig(output_dir / "sex_by_cancer_type.png", dpi=200)
+        plt.show()
+        plt.close(fig)

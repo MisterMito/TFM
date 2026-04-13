@@ -693,3 +693,154 @@ Durante la iteración se consolidaron además los siguientes ajustes:
     además de un entrenamiento final del mejor modelo con guardado completo.
 
 ---
+
+## Iteración 5: Clustering no supervisado y variables clínicas como features predictoras (rama `feat/unsupervised_label`)
+
+### 1. Objetivo de la iteración
+
+Esta iteración exploró si la información de agrupación no supervisada (clusters de Malignant y nonMalignant) y las variables clínicas disponibles (Age, Sex) podían mejorar los modelos de la Iteración 4. Se siguió una secuencia de tres sub-iteraciones con decisiones progresivas.
+
+### 2. Sub-iteración 5.1: Clusters de nonMalignant como etiquetas en y
+
+**Hipótesis:** separar nonMalignant en subclases (`nonMalignant_0`, `nonMalignant_1`) podría ayudar al modelo a aprender mejor las fronteras de decisión.
+
+**Pipeline de clustering** (en `heterogeneity.py`):
+- log1p → StandardScaler → PCA(90% varianza) → KMeans(k=2).
+- Ajuste independiente en train y test (sin leakage).
+- Alineación de etiquetas train/test por proporción de "Asymptomatic controls".
+
+**Cambios en código:**
+- `heterogeneity.py`: `generate_nonmalignant_clusters()`, `align_cluster_labels()`.
+- `train_multiclass.py`: helpers `_is_nonmalignant()/_mask()`, `build_y_multiclass_with_clusters()`, `build_xy_with_clusters()`, campo `cluster_col` en configs (default `None`).
+- Notebooks nuevos sin tocar los existentes: `1.2`, `4.1`, `5.1`.
+- Parquets intermedios: `*_clustered.parquet` con columna `nm_cluster`.
+
+**Resultado:** sin mejora. Las métricas de 4.1 y 5.1 son comparables o peores que los baselines 4.0/5.0.
+
+### 3. Sub-iteración 5.2: Clusters de Malignant como etiquetas en y
+
+**Hipótesis:** agrupar los 18 tipos de cáncer en k clusters automáticos podría reducir la fragmentación del espacio de clases y mejorar la clasificación.
+
+**Pipeline de clustering** (ampliado en `heterogeneity.py`):
+- log1p → StandardScaler → PCA(90%) → búsqueda automática de k por silhouette score.
+- Alineación train/test con **algoritmo húngaro** sobre similitud coseno de distribuciones de `Patient_group` por cluster. Válido para cualquier k.
+- Búsqueda de k solo en train para evitar leakage.
+
+**Cambios en código:**
+- `heterogeneity.py`: `generate_malignant_clusters()`, `generate_malignant_clusters_fixed_k()`, `align_malignant_cluster_labels()`.
+- `train_multiclass.py`: helpers `_is_malignant_cluster()/_mask()`, `build_y_multiclass_with_malignant_clusters()`, `build_xy_with_malignant_clusters()`, campo `malignant_cluster_col` en configs (default `None`).
+- Notebooks 1.2, 4.1, 5.1 actualizados.
+
+**Resultado:** sin mejora. Los clusters en y no capturan información útil para el clasificador; 5.1 empeoró incluso la especificidad respecto a 5.0 (0.3517 vs 0.6690). Se descartó este enfoque.
+
+### 4. Sub-iteración 5.3: Clusters y variables clínicas como features en X
+
+**Decisión clave:** mover los cluster labels de **y** a **X** e incorporar Age y Sex como variables predictoras, en lugar de modificar el espacio de clases.
+
+#### 4.1. Nuevo transformer: `ClinicalFeaturePreprocessor`
+
+Clase sklearn en `genomics_dl/features_sklearn.py` que preprocesa features clínicas dentro del pipeline sin leakage:
+
+- **Age**: imputación con mediana de train, estandarización (media/std de train). 1 columna.
+- **Sex**: imputación de "n.a." con moda de train, one-hot encoding. 2 columnas (Sex_F, Sex_M).
+- **Cluster dummies** (`mal_cluster`, `nm_cluster`): passthrough (NaN = 0 para la clase contraria).
+
+#### 4.2. ColumnTransformer en los pipelines de entrenamiento
+
+Se modificaron `build_pipeline()` y `build_hierarchical_pipeline()` en `train_multiclass.py` para soportar un `ColumnTransformer` con dos ramas independientes cuando se detectan columnas clínicas en X:
+
+```
+"genes":    HighVarGeneSelector → Log1p → VarianceFilter → Scaler → (PCA)
+"clinical": ClinicalFeaturePreprocessor
+```
+
+Sin columnas clínicas el pipeline es idéntico al anterior (retrocompatibilidad total).
+
+#### 4.3. Nuevos campos en configs (retrocompatibles)
+
+```python
+age_col: Optional[str] = None
+sex_col: Optional[str] = None
+cluster_as_feature: bool = False
+nm_cluster_col: Optional[str] = None
+```
+
+#### 4.4. Generación de nm_cluster y EDA clínico
+
+- Notebook `1.2` ampliado para generar también `nm_cluster` (KMeans k=2 sobre nonMalignant, mismo pipeline que en 5.1).
+- Notebook nuevo `1.3-ssic-clinical-features-analysis.ipynb`: análisis de asociación estadística Age/Sex vs tipos de cáncer (chi-cuadrado + V de Cramer para Sex, Kruskal-Wallis para Age), visualizaciones y análisis de missing values.
+- Funciones de análisis en `heterogeneity.py`: `compute_clinical_associations()`, `plot_clinical_associations()`.
+
+#### 4.5. Notebooks de entrenamiento con X enriquecido
+
+- `4.2-ssic-multiclass-with-clinical-features.ipynb`: sweep multiclase con genes + clusters + Age + Sex, y = 19 clases originales.
+- `5.2-ssic-hierarchical-with-clinical-features.ipynb`: sweep jerárquico con X enriquecido.
+
+#### 4.6. Tests unitarios
+
+- `tests/test_features_sklearn.py`: tests para `ClinicalFeaturePreprocessor` (imputación, one-hot, no leakage entre fit/transform).
+
+### 5. Prevención de leakage
+
+| Componente | Estrategia |
+|---|---|
+| Clustering | Ajuste independiente por split |
+| Age imputation/scaling | Mediana y estadísticos de train dentro del pipeline |
+| Sex imputation/one-hot | Moda y categorías de train dentro del pipeline |
+| cross_val_predict | ColumnTransformer se re-ajusta por fold |
+
+### 6. Resultados
+
+#### Comparativa multiclase (4.0 vs 4.2)
+
+| Métrica | 4.0 (baseline) | 4.2 (clínicas + clusters en X) | Delta |
+|---|---|---|---|
+| Cancer FN | 37 | 30 | **-7** |
+| Cancer Recall | 0.8865 | 0.9080 | +0.0215 |
+| Cancer Specificity | 0.5517 | 0.8966 | **+0.3449** |
+| Cancer ROC AUC | 0.8326 | 0.9710 | **+0.1384** |
+| Cancer PR AUC | 0.9141 | 0.9857 | +0.0716 |
+| F1 Macro | 0.2037 | 0.2119 | +0.0082 |
+| Accuracy | 0.4565 | 0.5584 | +0.1019 |
+
+Mejor modelo 4.2: Random Forest, var_quantile=0.1, malignant_weight=2.0. Guardado en `models/multiclass_clinical_final/v0.4.0`.
+
+#### Comparativa jerárquica (5.0 vs 5.1 vs 5.2)
+
+| Métrica | 5.0 | 5.1 | 5.2 | Delta 5.0→5.2 |
+|---|---|---|---|---|
+| Cancer FN | 33 | 33 | **14** | **-19** |
+| Cancer Recall | 0.8988 | 0.8988 | **0.9571** | +0.0583 |
+| Cancer Specificity | 0.6690 | 0.6690 | **1.0000** | **+0.3310** |
+| F1 Macro | 0.3636 | 0.3337 | **0.3993** | +0.0357 |
+| Accuracy | 0.5520 | 0.4522 | **0.6730** | +0.1210 |
+| Cancer ROC AUC | 0.8756 | 0.8756 | **1.0000** | **+0.1244** |
+| Cancer PR AUC | 0.9350 | 0.9350 | **1.0000** | +0.0650 |
+
+Mejor modelo 5.2: Stage1 XGBoost, Stage2 LightGBM, weighting balanced, min_recall 0.9. Guardado en `models/hierarchical_clinical_final/v0.5.0`.
+
+En el sweep de 5.2, las 12 configuraciones lograron cancer_fn=0 en cross-validation, lo que confirma que las features clínicas + cluster dummies permiten una separación casi perfecta en la etapa binaria.
+
+### 7. Conclusiones de la iteración
+
+- **Mover los clusters a X fue la decisión correcta.** Usarlos como etiquetas en y (sub-iteraciones 5.1 y 5.2) no aportó mejoras y en algunos casos deterioró el rendimiento.
+- **Las features clínicas y los cluster dummies aportan información complementaria** a la expresión génica que los modelos baselines no capturaban. El ColumnTransformer con ramas separadas garantiza que cada tipo de feature recibe el preprocesado adecuado.
+- **El modelo jerárquico con features clínicas (5.2) es el mejor resultado global hasta la fecha**: 14 FN en test (vs 33 en 5.0), especificidad perfecta (1.0), ROC/PR AUC perfectos en detección de cáncer.
+- **Limitación persistente:** la clasificación fina por tipo de cáncer sigue siendo el reto principal (F1 macro ~0.40). Los tipos con pocas muestras (Esophageal, Lymphoma, Multiple Myeloma, Prostate, Renal cell) continúan con recall muy bajo o nulo.
+
+### 8. Ficheros modificados/creados en la rama
+
+| Fichero | Acción |
+|---|---|
+| `genomics_dl/features_sklearn.py` | `ClinicalFeaturePreprocessor` |
+| `genomics_dl/models/heterogeneity.py` | Clustering Malignant/nonMalignant, asociaciones estadísticas |
+| `genomics_dl/models/train_multiclass.py` | Configs, ColumnTransformer, `build_xy_enriched` |
+| `notebooks/1.2-ssic-unsupervised-cluster-labels.ipynb` | Actualizado: `nm_cluster` + `mal_cluster` |
+| `notebooks/1.3-ssic-clinical-features-analysis.ipynb` | Nuevo: EDA clínico |
+| `notebooks/4.1-ssic-multiclass-with-clusters.ipynb` | Nuevo: clusters en y (descartado) |
+| `notebooks/4.2-ssic-multiclass-with-clinical-features.ipynb` | Nuevo: X enriquecido |
+| `notebooks/5.1-ssic-hierarchical-with-clusters.ipynb` | Nuevo: clusters en y (descartado) |
+| `notebooks/5.2-ssic-hierarchical-with-clinical-features.ipynb` | Nuevo: X enriquecido |
+| `tests/test_features_sklearn.py` | Nuevo: tests `ClinicalFeaturePreprocessor` |
+
+---

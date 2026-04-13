@@ -1,0 +1,295 @@
+{
+  "train": {
+    "accuracy": 0.9771276595744681,
+    "balanced_accuracy": 0.9635252298607606,
+    "f1_macro": 0.9789250284591439,
+    "f1_weighted": 0.9770187343446974,
+    "cancer_tn": 578,
+    "cancer_fp": 0,
+    "cancer_fn": 43,
+    "cancer_tp": 1259,
+    "cancer_fnr": 0.03302611367127496,
+    "cancer_recall_sensitivity": 0.966973886328725,
+    "cancer_specificity": 1.0,
+    "cancer_precision": 1.0,
+    "cancer_roc_auc": 1.0,
+    "cancer_pr_auc": 1.0,
+    "stage1_threshold": 0.9563502669334412,
+    "per_class_report": {
+      "Breast cancer": {
+        "precision": 1.0,
+        "recall": 0.9875,
+        "f1-score": 0.9937106918238994,
+        "support": 80.0
+      },
+      "Cholangiocarcinoma": {
+        "precision": 1.0,
+        "recall": 0.9859154929577465,
+        "f1-score": 0.9929078014184397,
+        "support": 71.0
+      },
+      "Colorectal cancer": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 69.0
+      },
+      "Endometrial cancer": {
+        "precision": 1.0,
+        "recall": 0.9411764705882353,
+        "f1-score": 0.9696969696969697,
+        "support": 34.0
+      },
+      "Esophageal carcinoma": {
+        "precision": 1.0,
+        "recall": 0.8333333333333334,
+        "f1-score": 0.9090909090909091,
+        "support": 12.0
+      },
+      "Glioma": {
+        "precision": 1.0,
+        "recall": 0.8672566371681416,
+        "f1-score": 0.9289099526066351,
+        "support": 113.0
+      },
+      "Head and neck cancer": {
+        "precision": 1.0,
+        "recall": 0.9113924050632911,
+        "f1-score": 0.9536423841059603,
+        "support": 79.0
+      },
+      "Hepatocellular carcinoma": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 19.0
+      },
+      "Lymphoma": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 16.0
+      },
+      "Melanoma": {
+        "precision": 1.0,
+        "recall": 0.9814814814814815,
+        "f1-score": 0.9906542056074766,
+        "support": 54.0
+      },
+      "Multiple Myeloma": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 22.0
+      },
+      "Non-small-cell lung cancer": {
+        "precision": 1.0,
+        "recall": 0.9952038369304557,
+        "f1-score": 0.9975961538461539,
+        "support": 417.0
+      },
+      "Ovarian cancer": {
+        "precision": 1.0,
+        "recall": 0.9649122807017544,
+        "f1-score": 0.9821428571428571,
+        "support": 114.0
+      },
+      "Pancreatic cancer": {
+        "precision": 1.0,
+        "recall": 0.956989247311828,
+        "f1-score": 0.978021978021978,
+        "support": 93.0
+      },
+      "Prostate cancer": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 23.0
+      },
+      "Renal cell cancer": {
+        "precision": 1.0,
+        "recall": 0.95,
+        "f1-score": 0.9743589743589743,
+        "support": 20.0
+      },
+      "Sarcoma": {
+        "precision": 1.0,
+        "recall": 0.9318181818181818,
+        "f1-score": 0.9647058823529412,
+        "support": 44.0
+      },
+      "Urothelial cancer": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 22.0
+      },
+      "nonMalignant": {
+        "precision": 0.9307568438003221,
+        "recall": 1.0,
+        "f1-score": 0.9641367806505421,
+        "support": 578.0
+      },
+      "accuracy": 0.9771276595744681,
+      "macro avg": {
+        "precision": 0.9963556233579116,
+        "recall": 0.9635252298607606,
+        "f1-score": 0.9789250284591439,
+        "support": 1880.0
+      },
+      "weighted avg": {
+        "precision": 0.9787114126152053,
+        "recall": 0.9771276595744681,
+        "f1-score": 0.9770187343446974,
+        "support": 1880.0
+      }
+    }
+  },
+  "test": {
+    "accuracy": 0.673036093418259,
+    "balanced_accuracy": 0.3739824810461929,
+    "f1_macro": 0.39929384532323303,
+    "f1_weighted": 0.6470891986125517,
+    "cancer_tn": 145,
+    "cancer_fp": 0,
+    "cancer_fn": 14,
+    "cancer_tp": 312,
+    "cancer_fnr": 0.04294478527607362,
+    "cancer_recall_sensitivity": 0.9570552147239264,
+    "cancer_specificity": 1.0,
+    "cancer_precision": 1.0,
+    "cancer_roc_auc": 1.0,
+    "cancer_pr_auc": 1.0,
+    "stage1_threshold": 0.9563502669334412,
+    "per_class_report": {
+      "Breast cancer": {
+        "precision": 0.36363636363636365,
+        "recall": 0.6153846153846154,
+        "f1-score": 0.45714285714285713,
+        "support": 13.0
+      },
+      "Cholangiocarcinoma": {
+        "precision": 0.125,
+        "recall": 0.07142857142857142,
+        "f1-score": 0.09090909090909091,
+        "support": 14.0
+      },
+      "Colorectal cancer": {
+        "precision": 0.3076923076923077,
+        "recall": 0.25,
+        "f1-score": 0.27586206896551724,
+        "support": 16.0
+      },
+      "Endometrial cancer": {
+        "precision": 0.2,
+        "recall": 0.2,
+        "f1-score": 0.2,
+        "support": 5.0
+      },
+      "Esophageal carcinoma": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 3.0
+      },
+      "Glioma": {
+        "precision": 0.5,
+        "recall": 0.3684210526315789,
+        "f1-score": 0.42424242424242425,
+        "support": 19.0
+      },
+      "Head and neck cancer": {
+        "precision": 0.6153846153846154,
+        "recall": 0.7272727272727273,
+        "f1-score": 0.6666666666666666,
+        "support": 22.0
+      },
+      "Hepatocellular carcinoma": {
+        "precision": 1.0,
+        "recall": 0.5,
+        "f1-score": 0.6666666666666666,
+        "support": 4.0
+      },
+      "Lymphoma": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 4.0
+      },
+      "Melanoma": {
+        "precision": 0.375,
+        "recall": 0.21428571428571427,
+        "f1-score": 0.2727272727272727,
+        "support": 14.0
+      },
+      "Multiple Myeloma": {
+        "precision": 1.0,
+        "recall": 0.2222222222222222,
+        "f1-score": 0.36363636363636365,
+        "support": 9.0
+      },
+      "Non-small-cell lung cancer": {
+        "precision": 0.5958904109589042,
+        "recall": 0.8285714285714286,
+        "f1-score": 0.6932270916334662,
+        "support": 105.0
+      },
+      "Ovarian cancer": {
+        "precision": 0.6129032258064516,
+        "recall": 0.6333333333333333,
+        "f1-score": 0.6229508196721312,
+        "support": 30.0
+      },
+      "Pancreatic cancer": {
+        "precision": 0.9230769230769231,
+        "recall": 0.36363636363636365,
+        "f1-score": 0.5217391304347826,
+        "support": 33.0
+      },
+      "Prostate cancer": {
+        "precision": 0.7142857142857143,
+        "recall": 0.4166666666666667,
+        "f1-score": 0.5263157894736842,
+        "support": 12.0
+      },
+      "Renal cell cancer": {
+        "precision": 1.0,
+        "recall": 0.25,
+        "f1-score": 0.4,
+        "support": 8.0
+      },
+      "Sarcoma": {
+        "precision": 0.2,
+        "recall": 0.1111111111111111,
+        "f1-score": 0.14285714285714285,
+        "support": 9.0
+      },
+      "Urothelial cancer": {
+        "precision": 0.2857142857142857,
+        "recall": 0.3333333333333333,
+        "f1-score": 0.3076923076923077,
+        "support": 6.0
+      },
+      "nonMalignant": {
+        "precision": 0.9119496855345912,
+        "recall": 1.0,
+        "f1-score": 0.9539473684210527,
+        "support": 145.0
+      },
+      "accuracy": 0.673036093418259,
+      "macro avg": {
+        "precision": 0.5121333437942187,
+        "recall": 0.3739824810461929,
+        "f1-score": 0.39929384532323303,
+        "support": 471.0
+      },
+      "weighted avg": {
+        "precision": 0.673937066376769,
+        "recall": 0.673036093418259,
+        "f1-score": 0.6470891986125517,
+        "support": 471.0
+      }
+    }
+  },
+  "threshold": 0.9563502669334412
+}
