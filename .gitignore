@@ -194,3 +194,7 @@ notebooks/mlruns/
 notebooks/mlflow.db
 mlruns/
 mlflow.db
+
+# Claude Code — personal overrides
+CLAUDE.local.md
+.claude/settings.local.json

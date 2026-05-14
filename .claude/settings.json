@@ -1,0 +1,47 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ruff format $CLAUDE_FILE_PATHS 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "PreCommit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ruff check . --fix && uv run pytest -q --tb=short"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Edit(**)",
+      "Bash(uv run *)",
+      "Bash(uv sync *)",
+      "Bash(uv add *)",
+      "Bash(git *)",
+      "Bash(cat *)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Bash(grep *)",
+      "Bash(gh *)"
+    ],
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(pip install *)"
+    ]
+  }
+}
