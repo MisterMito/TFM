@@ -8,6 +8,12 @@ See @docs/docs/TFM_Dev_Guide.md for the full Dev Container / uv / Git LFS workfl
 See @docs/01_guia_trabajo_tfm.md for the per-iteration log used in the thesis write-up.
 See @pyproject.toml for Python version, dependencies and tool config.
 
+## Development environment
+
+**Always run Claude Code (and do all development) from inside the Dev Container, never from the Windows/macOS host terminal.** The container pins Python 3.12, `uv`, Git LFS and the pre-commit toolchain, so the CI gates only match locally when commands run there. Open the repo in VS Code → **Dev Containers: Reopen in Container** before starting a Claude Code session.
+
+Quick self-check that the session is inside the container: `cat /.dockerenv` exists, `whoami` is `vscode`, and the working dir is `/workspaces/TFM`. If instead you see a Windows path or your host user, stop and reopen in the container.
+
 ## Language convention
 
 - **Prose in Spanish** — docstrings, inline comments, log/error messages, notebook markdown, conclusions, `docs/**`, commit bodies, PR descriptions. Match the surrounding language when editing; never translate Spanish prose as a side-effect.

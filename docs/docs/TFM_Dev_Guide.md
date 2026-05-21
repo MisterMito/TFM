@@ -136,6 +136,10 @@ git lfs pull
 ---
 
 ## 5) Trabajo con Dev Container
+> **Buena práctica obligatoria:** todo el desarrollo —incluido **Claude Code**— se ejecuta **dentro del Dev Container**, nunca desde la terminal del host (Windows/macOS). El contenedor fija Python 3.12, `uv`, Git LFS y el toolchain de pre-commit; solo así los comandos locales coinciden con los *gates* de CI.
+>
+> Comprobación rápida de que la sesión está dentro del contenedor: existe `/.dockerenv`, `whoami` devuelve `vscode` y el directorio de trabajo es `/workspaces/TFM`. Si ves una ruta de Windows o tu usuario del host, abre primero **“Reopen in Container”**.
+
 - Abrir el repositorio y usar **“Reopen in Container”**.
 - Si se modifican archivos del contenedor (`Dockerfile`/`devcontainer.json`), ejecutar **Rebuild and Reopen**.
 - Verificar `git lfs` dentro de la imagen; si no está, instalar en Dockerfile o en `postCreateCommand`.
