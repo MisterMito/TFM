@@ -1,0 +1,74 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import json,sys,subprocess; d=json.load(sys.stdin); p=(d.get('tool_input') or {}).get('file_path',''); p.endswith('.py') and subprocess.run(['uv','run','ruff','format',p])\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import json, sys, re\nd = json.load(sys.stdin)\nc = (d.get('tool_input') or {}).get('command', '')\npatterns = [r'--force\\b', r'--force-with-lease\\b', r'--no-verify\\b', r'push\\s+.*\\s+main\\b', r'reset\\s+--hard', r'\\brm\\s+-rf\\s+/']\nbad = [p for p in patterns if re.search(p, c)]\nif bad:\n    sys.stderr.write('Bloqueado por politica del proyecto (CLAUDE.md): patron ' + bad[0] + '. Pide autorizacion explicita al usuario.\\n')\n    sys.exit(2)\n\""
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Edit(**)",
+      "Write(**)",
+      "Bash(uv run *)",
+      "Bash(uv sync*)",
+      "Bash(uv add *)",
+      "Bash(uv remove *)",
+      "Bash(uv lock*)",
+      "Bash(uv build*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git switch *)",
+      "Bash(git checkout -b *)",
+      "Bash(git branch*)",
+      "Bash(git pull)",
+      "Bash(git fetch*)",
+      "Bash(git restore*)",
+      "Bash(git stash*)",
+      "Bash(git lfs ls-files*)",
+      "Bash(git lfs pull)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(wc *)",
+      "Bash(gh pr view*)",
+      "Bash(gh pr list*)",
+      "Bash(gh pr diff*)",
+      "Bash(gh issue view*)",
+      "Bash(gh issue list*)",
+      "Bash(gh run list*)",
+      "Bash(gh run view*)"
+    ],
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(pip install *)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git push --force-with-lease*)",
+      "Bash(git reset --hard*)",
+      "Bash(git commit *--no-verify*)",
+      "Bash(git push *--no-verify*)"
+    ]
+  }
+}
