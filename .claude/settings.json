@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python -c \"import json,sys,re; d=json.load(sys.stdin); c=(d.get('tool_input') or {}).get('command',''); bad=[p for p in [r'--force\\b',r'--force-with-lease\\b',r'--no-verify\\b',r'push\\s+.*\\s+main\\b',r'reset\\s+--hard',r'\\brm\\s+-rf\\s+/'] if re.search(p,c)]; sys.stderr.write('Bloqueado por politica del proyecto (CLAUDE.md): patron '+bad[0]+'. Pide autorizacion explicita al usuario.\\n') or sys.exit(2) if bad else None\""
+            "command": "python -c \"import json, sys, re\nd = json.load(sys.stdin)\nc = (d.get('tool_input') or {}).get('command', '')\npatterns = [r'--force\\b', r'--force-with-lease\\b', r'--no-verify\\b', r'push\\s+.*\\s+main\\b', r'reset\\s+--hard', r'\\brm\\s+-rf\\s+/']\nbad = [p for p in patterns if re.search(p, c)]\nif bad:\n    sys.stderr.write('Bloqueado por politica del proyecto (CLAUDE.md): patron ' + bad[0] + '. Pide autorizacion explicita al usuario.\\n')\n    sys.exit(2)\n\""
           }
         ]
       }
@@ -27,6 +27,7 @@
     "allow": [
       "Read(**)",
       "Edit(**)",
+      "Write(**)",
       "Bash(uv run *)",
       "Bash(uv sync*)",
       "Bash(uv add *)",
